@@ -24,7 +24,9 @@ class ArtDataset(Dataset):
             text=[text],
             images=image,
             return_tensors="pt",
-            padding=True
+            padding="max_length",
+            truncation=True,
+            max_length=77
         )
 
         return {

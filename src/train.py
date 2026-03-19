@@ -34,7 +34,7 @@ def train():
     model = CLIPFineTuner().to(device)
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=Config.LR)
 
-    scaler = GradScaler(enabled=Config.MIXED_PRECISION)
+    scaler = torch.amp.GradScaler('cuda', enabled=Config.MIXED_PRECISION)
 
     model.train()
 
