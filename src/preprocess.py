@@ -12,8 +12,8 @@ import kagglehub
 # ---------------------------
 TOP_K = 2
 OUTPUT_FILE = "pairs.json"
-MAX_IMAGES = 20000
-MAX_ROWS = 20000
+MAX_IMAGES = 40000   
+MAX_ROWS = 40000
 
 PROMPT_TEMPLATE = "a painting that evokes {}"
 
@@ -44,20 +44,32 @@ def download_datasets():
 
 
 # ---------------------------
-# BUILD IMAGE INDEX (LIMITED)
+# BUILD IMAGE INDEX (USING classes.csv)
 # ---------------------------
-def build_image_index(root):
+def build_image_index(wikiart_root):
+    csv_path = wikiart_root / "classes.csv"
+
+    if not csv_path.exists():
+        raise FileNotFoundError("classes.csv not found")
+
+    df = pd.read_csv(csv_path)
+
     image_map = {}
-    count = 0
 
-    for path in root.rglob("*"):
-        if path.suffix.lower() in [".jpg", ".jpeg", ".png"]:
-            key = path.stem.lower()
-            image_map[key] = str(path)
+    for i, row in df.iterrows():
+        if i >= MAX_IMAGES:
+            break
 
-            count += 1
-            if count >= MAX_IMAGES:
-                break
+        file_path = row["filename"]  # full relative path
+        full_path = wikiart_root / file_path
+
+        if not full_path.exists():
+            continue
+
+        # extract key (same as artemis painting)
+        key = Path(file_path).stem.lower()
+
+        image_map[key] = str(full_path)
 
     print(f"Indexed {len(image_map)} images")
     return image_map
@@ -76,7 +88,7 @@ def load_artemis_csv(artemis_root):
 
 
 # ---------------------------
-# PARSE EMOTION HISTOGRAM
+# PARSE EMOTIONS
 # ---------------------------
 def get_top_emotions(row, k=2):
     hist = ast.literal_eval(row["emotion_histogram"])
@@ -87,42 +99,38 @@ def get_top_emotions(row, k=2):
 
 
 # ---------------------------
-# NORMALIZE IMAGE ID
-# ---------------------------
-def normalize_id(name):
-    return str(name).lower().replace(" ", "_").replace("-", "_")
-
-
-# ---------------------------
 # MAIN PREPROCESSING
 # ---------------------------
 def preprocess():
     wikiart_root, artemis_root = download_datasets()
 
-    print("Indexing images...")
+    print("Building image index using classes.csv...")
     image_map = build_image_index(wikiart_root)
 
     print("Loading ArtEmis CSV...")
     df = load_artemis_csv(artemis_root)
 
-    # reduce dataset size (important)
+    # reduce dataset size
     df = df.sample(n=MAX_ROWS, random_state=42)
 
     ID_COL = "painting"
 
     pairs = []
     skipped = 0
+    matched = 0
 
     print("Creating pairs...")
 
     for _, row in df.iterrows():
-        image_id = normalize_id(row[ID_COL])
+        image_id = str(row[ID_COL]).lower()
 
         if image_id not in image_map:
             skipped += 1
             continue
 
+        matched += 1
         image_path = image_map[image_id]
+
         emotions = get_top_emotions(row, TOP_K)
 
         for emotion in emotions:
@@ -131,10 +139,11 @@ def preprocess():
                 "text": PROMPT_TEMPLATE.format(emotion)
             })
 
+    print(f"Matched: {matched}")
+    print(f"Skipped: {skipped}")
     print(f"Total pairs: {len(pairs)}")
-    print(f"Skipped (no match): {skipped}")
 
-    # save output
+    # save
     output_path = Path("data/processed")
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -143,7 +152,7 @@ def preprocess():
 
     print("Saved to:", output_path / OUTPUT_FILE)
 
-    # CLEAN CACHE (VERY IMPORTANT)
+    # CLEAN CACHE
     print("Cleaning dataset cache...")
     shutil.rmtree("/root/.cache/kagglehub", ignore_errors=True)
     print("Cache cleaned")
