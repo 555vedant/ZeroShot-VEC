@@ -1,6 +1,8 @@
-from src.inference import SearchEngine
+import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent))    
+
+from src.inference import SearchEngine
 
 if __name__ == "__main__":
     engine = SearchEngine()
