@@ -1,5 +1,7 @@
 import os
 import json
+import ast
+import shutil
 import pandas as pd
 from pathlib import Path
 import kagglehub
@@ -10,8 +12,22 @@ import kagglehub
 # ---------------------------
 TOP_K = 2
 OUTPUT_FILE = "pairs.json"
+MAX_IMAGES = 20000
+MAX_ROWS = 20000
 
 PROMPT_TEMPLATE = "a painting that evokes {}"
+
+EMOTIONS = [
+    "amusement",
+    "anger",
+    "awe",
+    "contentment",
+    "disgust",
+    "excitement",
+    "fear",
+    "sadness",
+    "something_else"
+]
 
 
 # ---------------------------
@@ -28,16 +44,22 @@ def download_datasets():
 
 
 # ---------------------------
-# FIND ALL IMAGES
+# BUILD IMAGE INDEX (LIMITED)
 # ---------------------------
 def build_image_index(root):
     image_map = {}
+    count = 0
 
     for path in root.rglob("*"):
         if path.suffix.lower() in [".jpg", ".jpeg", ".png"]:
-            image_id = path.stem.lower()
-            image_map[image_id] = str(path)
+            key = path.stem.lower()
+            image_map[key] = str(path)
 
+            count += 1
+            if count >= MAX_IMAGES:
+                break
+
+    print(f"Indexed {len(image_map)} images")
     return image_map
 
 
@@ -45,27 +67,30 @@ def build_image_index(root):
 # LOAD ARTEMIS CSV
 # ---------------------------
 def load_artemis_csv(artemis_root):
-    # find histogram csv
-    csv_path = None
     for p in artemis_root.rglob("image-emotion-histogram.csv"):
-        csv_path = p
-        break
+        df = pd.read_csv(p)
+        print("CSV loaded:", p)
+        return df
 
-    if csv_path is None:
-        raise FileNotFoundError("image-emotion-histogram.csv not found")
-
-    df = pd.read_csv(csv_path)
-    return df
+    raise FileNotFoundError("image-emotion-histogram.csv not found")
 
 
 # ---------------------------
-# EXTRACT TOP-K EMOTIONS
+# PARSE EMOTION HISTOGRAM
 # ---------------------------
-def get_top_emotions(row, emotion_cols, k=2):
-    values = row[emotion_cols].values
-    indices = values.argsort()[::-1][:k]
+def get_top_emotions(row, k=2):
+    hist = ast.literal_eval(row["emotion_histogram"])
 
-    return [emotion_cols[i] for i in indices]
+    idx = sorted(range(len(hist)), key=lambda i: hist[i], reverse=True)[:k]
+
+    return [EMOTIONS[i] for i in idx]
+
+
+# ---------------------------
+# NORMALIZE IMAGE ID
+# ---------------------------
+def normalize_id(name):
+    return str(name).lower().replace(" ", "_").replace("-", "_")
 
 
 # ---------------------------
@@ -80,8 +105,10 @@ def preprocess():
     print("Loading ArtEmis CSV...")
     df = load_artemis_csv(artemis_root)
 
-    # emotion columns (all except id/image column)
-    emotion_cols = [col for col in df.columns if col not in ["id"]]
+    # reduce dataset size (important)
+    df = df.sample(n=MAX_ROWS, random_state=42)
+
+    ID_COL = "painting"
 
     pairs = []
     skipped = 0
@@ -89,28 +116,25 @@ def preprocess():
     print("Creating pairs...")
 
     for _, row in df.iterrows():
-        image_id = str(row["id"]).lower()
+        image_id = normalize_id(row[ID_COL])
 
         if image_id not in image_map:
             skipped += 1
             continue
 
         image_path = image_map[image_id]
-
-        emotions = get_top_emotions(row, emotion_cols, TOP_K)
+        emotions = get_top_emotions(row, TOP_K)
 
         for emotion in emotions:
-            text = PROMPT_TEMPLATE.format(emotion)
-
             pairs.append({
                 "image": image_path,
-                "text": text
+                "text": PROMPT_TEMPLATE.format(emotion)
             })
 
     print(f"Total pairs: {len(pairs)}")
-    print(f"Skipped (no image match): {skipped}")
+    print(f"Skipped (no match): {skipped}")
 
-    # save
+    # save output
     output_path = Path("data/processed")
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -118,6 +142,11 @@ def preprocess():
         json.dump(pairs, f)
 
     print("Saved to:", output_path / OUTPUT_FILE)
+
+    # CLEAN CACHE (VERY IMPORTANT)
+    print("Cleaning dataset cache...")
+    shutil.rmtree("/root/.cache/kagglehub", ignore_errors=True)
+    print("Cache cleaned")
 
 
 # ---------------------------
