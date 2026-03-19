@@ -17,31 +17,21 @@ class ArtDataset(Dataset):
     def __getitem__(self, idx):
         item = self.data[idx]
 
-        image = Image.open(item["image"]).convert("RGB")
+        with Image.open(item["image"]) as img:
+            image = img.convert("RGB")
         text = item["text"]
 
-        # return raw (no processing here)
+        inputs = self.processor(
+            text=[text],
+            images=image,
+            return_tensors="pt",
+            padding="max_length",
+            truncation=True,
+            max_length=Config.TEXT_MAX_LENGTH,
+        )
+
         return {
-            "image": image,
-            "text": text
+            "pixel_values": inputs["pixel_values"].squeeze(0),
+            "input_ids": inputs["input_ids"].squeeze(0),
+            "attention_mask": inputs["attention_mask"].squeeze(0),
         }
-
-
-# ---------------------------
-# COLLATE FUNCTION 
-# ---------------------------
-def collate_fn(batch):
-    processor = CLIPProcessor.from_pretrained(Config.MODEL_NAME)
-
-    images = [item["image"] for item in batch]
-    texts = [item["text"] for item in batch]
-
-    inputs = processor(
-        text=texts,
-        images=images,
-        return_tensors="pt",
-        padding=True,       
-        truncation=True
-    )
-
-    return inputs

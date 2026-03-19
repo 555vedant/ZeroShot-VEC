@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 from PIL import Image
+from pathlib import Path
 from transformers import CLIPProcessor
 
 from src.model import CLIPFineTuner
@@ -12,8 +13,19 @@ class SearchEngine:
     def __init__(self):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
+        project_root = Path(__file__).resolve().parent.parent
+        checkpoint_path = project_root / Config.CHECKPOINT_FILE
+        if not checkpoint_path.exists():
+            fallback = project_root / "clip_model.pth"
+            checkpoint_path = fallback if fallback.exists() else checkpoint_path
+
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(
+                f"Checkpoint not found at {checkpoint_path}. Run training first to create the model file."
+            )
+
         self.model = CLIPFineTuner().to(self.device)
-        self.model.load_state_dict(torch.load("clip_model.pth"))
+        self.model.load_state_dict(torch.load(checkpoint_path, map_location=self.device))
         self.model.eval()
 
         self.processor = CLIPProcessor.from_pretrained(Config.MODEL_NAME)
