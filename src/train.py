@@ -3,6 +3,10 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.cuda.amp import autocast, GradScaler
 
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
 from src.dataset import ArtDataset
 from src.model import CLIPFineTuner
 from utils.config import Config
