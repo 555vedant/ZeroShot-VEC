@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from src.dataset import ArtDataset, collate_fn   # ✅ IMPORT FIX
+from src.dataset import ArtDataset, collate_fn
 from src.model import CLIPFineTuner
 from utils.config import Config
 
@@ -42,7 +42,6 @@ def train():
         collate_fn=collate_fn
     )
 
-    # Debug check (optional)
     print("Collate function:", loader.collate_fn)
 
     model = CLIPFineTuner().to(device)
@@ -61,6 +60,10 @@ def train():
         total_loss = 0
 
         for step, batch in enumerate(loader):
+
+            if batch is None:
+                continue
+
             batch = {k: v.to(device) for k, v in batch.items()}
 
             with torch.amp.autocast(device_type="cuda", enabled=use_amp):
