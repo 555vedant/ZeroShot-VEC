@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from src.dataset import ArtDataset
+from src.dataset import ArtDataset, collate_fn
 from src.model import CLIPFineTuner
 from utils.config import Config
 
@@ -29,7 +29,13 @@ def train():
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     dataset = ArtDataset()
-    loader = DataLoader(dataset, batch_size=Config.BATCH_SIZE, shuffle=True)
+    
+    loader = DataLoader(
+        dataset,
+        batch_size=Config.BATCH_SIZE,
+        shuffle=True,
+        collate_fn=collate_fn   
+    )
 
     model = CLIPFineTuner().to(device)
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=Config.LR)

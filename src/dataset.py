@@ -20,17 +20,28 @@ class ArtDataset(Dataset):
         image = Image.open(item["image"]).convert("RGB")
         text = item["text"]
 
-        inputs = self.processor(
-            text=[text],
-            images=image,
-            return_tensors="pt",
-            padding="max_length",
-            truncation=True,
-            max_length=77
-        )
-
+        # return raw (no processing here)
         return {
-            "pixel_values": inputs["pixel_values"].squeeze(0),
-            "input_ids": inputs["input_ids"].squeeze(0),
-            "attention_mask": inputs["attention_mask"].squeeze(0)
+            "image": image,
+            "text": text
         }
+
+
+# ---------------------------
+# COLLATE FUNCTION 
+# ---------------------------
+def collate_fn(batch):
+    processor = CLIPProcessor.from_pretrained(Config.MODEL_NAME)
+
+    images = [item["image"] for item in batch]
+    texts = [item["text"] for item in batch]
+
+    inputs = processor(
+        text=texts,
+        images=images,
+        return_tensors="pt",
+        padding=True,       
+        truncation=True
+    )
+
+    return inputs
