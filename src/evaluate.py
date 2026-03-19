@@ -1,7 +1,11 @@
+import sys
+
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
+from pathlib import Path
+sys.path.append(str(Path(__file__).resolve().parent.parent))
 from src.dataset import ArtDataset
 from src.model import CLIPFineTuner
 
