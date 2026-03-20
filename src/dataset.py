@@ -6,9 +6,7 @@ from utils.helpers import load_json
 from utils.config import Config
 
 
-# ---------------------------
 # DATASET
-# ---------------------------
 class ArtDataset(Dataset):
     def __init__(self):
         self.data = load_json(Config.DATA_FILE)
@@ -22,12 +20,11 @@ class ArtDataset(Dataset):
         image_path = item["image"]
         text = item["text"]
 
-        # SAFE IMAGE LOADING
         try:
             with Image.open(image_path) as img:
                 image = img.convert("RGB")
         except Exception:
-            return None  # skip bad/missing files
+            return None  # skipping bad samples
 
         return {
             "image": image,
@@ -35,17 +32,13 @@ class ArtDataset(Dataset):
         }
 
 
-# ---------------------------
 # GLOBAL PROCESSOR
-# ---------------------------
 processor = CLIPProcessor.from_pretrained(Config.MODEL_NAME)
 
 
-# ---------------------------
 # COLLATE FUNCTION 
-# ---------------------------
 def collate_fn(batch):
-    # remove failed samples
+    # failed samples
     batch = [b for b in batch if b is not None]
 
     if len(batch) == 0:
@@ -58,8 +51,9 @@ def collate_fn(batch):
         text=texts,
         images=images,
         return_tensors="pt",
-        padding=True,
-        truncation=True
+        padding="max_length",
+        truncation=True,
+        max_length=Config.TEXT_MAX_LENGTH
     )
 
     return inputs

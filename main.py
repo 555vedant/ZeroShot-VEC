@@ -1,4 +1,4 @@
-from src.preprocess import run as preprocess
+from src.preprocess import preprocess
 from src.train import train
 from src.evaluate import evaluate
 

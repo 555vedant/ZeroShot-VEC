@@ -1,4 +1,3 @@
-import os
 import json
 import ast
 import shutil
@@ -7,13 +6,12 @@ from pathlib import Path
 import kagglehub
 
 
-# ---------------------------
 # CONFIG
-# ---------------------------
 TOP_K = 2
 OUTPUT_FILE = "pairs.json"
 MAX_IMAGES = 40000   
 MAX_ROWS = 40000
+CLEAN_KAGGLE_CACHE = False
 
 PROMPT_TEMPLATE = "a painting that evokes {}"
 
@@ -30,9 +28,7 @@ EMOTIONS = [
 ]
 
 
-# ---------------------------
 # DOWNLOAD DATASETS
-# ---------------------------
 def download_datasets():
     wikiart_path = kagglehub.dataset_download("steubk/wikiart")
     artemis_path = kagglehub.dataset_download("samamostafa03/artemis-dataset")
@@ -43,9 +39,7 @@ def download_datasets():
     return Path(wikiart_path), Path(artemis_path)
 
 
-# ---------------------------
-# BUILD IMAGE INDEX (USING classes.csv)
-# ---------------------------
+# IMAGE INDEX (USING classes.csv)
 def build_image_index(wikiart_root):
     csv_path = wikiart_root / "classes.csv"
 
@@ -66,7 +60,6 @@ def build_image_index(wikiart_root):
         if not full_path.exists():
             continue
 
-        # extract key (same as artemis painting)
         key = Path(file_path).stem.lower()
 
         image_map[key] = str(full_path)
@@ -75,9 +68,7 @@ def build_image_index(wikiart_root):
     return image_map
 
 
-# ---------------------------
 # LOAD ARTEMIS CSV
-# ---------------------------
 def load_artemis_csv(artemis_root):
     for p in artemis_root.rglob("image-emotion-histogram.csv"):
         df = pd.read_csv(p)
@@ -87,9 +78,7 @@ def load_artemis_csv(artemis_root):
     raise FileNotFoundError("image-emotion-histogram.csv not found")
 
 
-# ---------------------------
 # PARSE EMOTIONS
-# ---------------------------
 def get_top_emotions(row, k=2):
     hist = ast.literal_eval(row["emotion_histogram"])
 
@@ -98,9 +87,7 @@ def get_top_emotions(row, k=2):
     return [EMOTIONS[i] for i in idx]
 
 
-# ---------------------------
-# MAIN PREPROCESSING
-# ---------------------------
+# PREPROCESSING
 def preprocess():
     wikiart_root, artemis_root = download_datasets()
 
@@ -110,8 +97,9 @@ def preprocess():
     print("Loading ArtEmis CSV...")
     df = load_artemis_csv(artemis_root)
 
-    # reduce dataset size
-    df = df.sample(n=MAX_ROWS, random_state=42)
+    # Reduce dataset size but do not request more rows than available.
+    sample_n = min(MAX_ROWS, len(df))
+    df = df.sample(n=sample_n, random_state=42)
 
     ID_COL = "painting"
 
@@ -152,14 +140,13 @@ def preprocess():
 
     print("Saved to:", output_path / OUTPUT_FILE)
 
-    # CLEAN CACHE
-    print("Cleaning dataset cache...")
-    shutil.rmtree("/root/.cache/kagglehub", ignore_errors=True)
-    print("Cache cleaned")
+    # Keep cache by default because JSON stores absolute image paths from this location.
+    if CLEAN_KAGGLE_CACHE:
+        cache_path = Path.home() / ".cache" / "kagglehub"
+        print(f"Cleaning dataset cache at: {cache_path}")
+        shutil.rmtree(cache_path, ignore_errors=True)
+        print("Cache cleaned")
 
 
-# ---------------------------
-# ENTRY
-# ---------------------------
 if __name__ == "__main__":
     preprocess()

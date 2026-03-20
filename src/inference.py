@@ -30,26 +30,62 @@ class SearchEngine:
 
         self.processor = CLIPProcessor.from_pretrained(Config.MODEL_NAME)
 
-        self.data = load_json(Config.DATA_FILE)
+        raw_data = load_json(Config.DATA_FILE)
+        self.data = self._build_unique_image_records(raw_data)
+
+        if len(self.data) == 0:
+            raise RuntimeError(
+                "No valid images found for search index. Check data/processed/pairs.json image paths."
+            )
+
         self.image_embs = self._build_index()
+
+    @staticmethod
+    def _build_unique_image_records(raw_data):
+        unique = {}
+
+        for item in raw_data:
+            image_path = item.get("image")
+
+            if not image_path:
+                continue
+
+            if image_path not in unique:
+                unique[image_path] = {"image": image_path}
+
+        return list(unique.values())
 
     def _build_index(self):
         embs = []
+        kept = []
 
         with torch.no_grad():
             for item in self.data:
-                image = Image.open(item["image"]).convert("RGB")
+                image_path = item["image"]
+
+                try:
+                    with Image.open(image_path) as img:
+                        image = img.convert("RGB")
+                except Exception:
+                    continue
 
                 inputs = self.processor(images=image, return_tensors="pt")
                 inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
                 out = self.model.model.get_image_features(**inputs)
                 embs.append(out)
+                kept.append(item)
 
+        if len(embs) == 0:
+            raise RuntimeError(
+                "Failed to create image index. All images failed to load."
+            )
+
+        self.data = kept
         embs = torch.cat(embs)
         return F.normalize(embs, dim=-1)
 
-    def search(self, query, top_k=5):
+    def search(self, query, top_k=Config.SEARCH_TOP_K):
         inputs = self.processor(text=[query], return_tensors="pt")
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
@@ -59,7 +95,8 @@ class SearchEngine:
         text_emb = F.normalize(text_emb, dim=-1)
 
         sims = (text_emb @ self.image_embs.T).squeeze(0)
-        idx = sims.topk(top_k).indices.tolist()
+        k = min(top_k, len(self.data))
+        idx = sims.topk(k).indices.tolist()
 
         results = [self.data[i]["image"] for i in idx]
         return results

@@ -9,9 +9,11 @@ class Config:
     TEXT_MAX_LENGTH = 77
 
     BATCH_SIZE = 32
-    EPOCHS = 5
+    EPOCHS = 10
     LR = 1e-5
     DEVICE = "cuda"
+
+    SEARCH_TOP_K = 5
 
     TEMPERATURE = 0.07
 
