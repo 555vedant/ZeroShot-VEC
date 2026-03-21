@@ -9,7 +9,7 @@ class Config:
     TEXT_MAX_LENGTH = 77
 
     BATCH_SIZE = 32
-    EPOCHS = 10
+    EPOCHS = 1
     LR = 1e-5
     DEVICE = "cuda"
 
