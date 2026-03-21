@@ -1,5 +1,4 @@
 import sys
-
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -30,64 +29,50 @@ def evaluate():
 
     project_root = Path(__file__).resolve().parent.parent
     checkpoint_path = project_root / Config.CHECKPOINT_FILE
-    if not checkpoint_path.exists():
-        fallback = project_root / "clip_model.pth"
-        checkpoint_path = fallback if fallback.exists() else checkpoint_path
 
     if not checkpoint_path.exists():
-        raise FileNotFoundError(
-            f"Checkpoint not found at {checkpoint_path}. Run training first to create the model file."
-        )
+        raise FileNotFoundError("Model checkpoint not found. Train first.")
 
-    print(f"Initializing model from '{checkpoint_path}'...")
+    print(f"Loading model from '{checkpoint_path}'...")
     model = CLIPFineTuner().to(device)
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
     model.eval()
 
-    print("Extracting image and text embeddings...")
-    image_embs = []
-    text_embs = []
-    valid_samples = 0
-    skipped_empty_batches = 0
+    print("Evaluating...")
+
+    correct = 0
+    total = 0
+    skipped = 0
 
     with torch.no_grad():
         for batch in tqdm(loader):
+
             if batch is None:
-                skipped_empty_batches += 1
+                skipped += 1
                 continue
 
-            batch_size = batch["input_ids"].size(0)
             batch = {k: v.to(device) for k, v in batch.items()}
 
-            img, txt = model(batch)
-            image_embs.append(img)
-            text_embs.append(txt)
-            valid_samples += batch_size
+            img_emb, txt_emb = model(batch)
 
-    if not image_embs:
-        raise RuntimeError(
-            "Evaluation produced zero valid samples. Check image paths in pairs.json and "
-            "ensure the dataset cache with images still exists."
-        )
+            # normalize embeddings
+            img_emb = F.normalize(img_emb, dim=-1)
+            txt_emb = F.normalize(txt_emb, dim=-1)
 
-    image_embs = F.normalize(torch.cat(image_embs), dim=-1).cpu()
-    text_embs = F.normalize(torch.cat(text_embs), dim=-1).cpu()
+            # similarity matrix (B x B)
+            logits = img_emb @ txt_emb.T
 
-    print("Calculating final accuracy...")
-    n = image_embs.size(0)
-    chunk_size = 1024
-    correct = 0
-    for start in tqdm(range(0, n, chunk_size), desc="Scoring"):
-        end = min(start + chunk_size, n)
-        sim_chunk = image_embs[start:end] @ text_embs.T
-        preds = sim_chunk.argmax(dim=1)
-        target = torch.arange(start, end)
-        correct += (preds == target).sum().item()
+            preds = logits.argmax(dim=1)
+            labels = torch.arange(len(img_emb)).to(device)
 
-    acc = correct / n
+            correct += (preds == labels).sum().item()
+            total += len(img_emb)
+
+    acc = correct / total if total > 0 else 0
+
     print(
         f"Zero-shot Retrieval Accuracy: {acc:.4f} | "
-        f"Valid samples: {valid_samples} | Skipped empty batches: {skipped_empty_batches}"
+        f"Samples: {total} | Skipped batches: {skipped}"
     )
 
 
