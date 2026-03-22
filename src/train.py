@@ -71,6 +71,9 @@ def train():
                 skipped_empty += 1
                 continue
 
+            # Remove raw_texts since they are strings and cannot be moved to GPU
+            batch.pop("raw_texts", None)
+
             # Contrastive CE with a 1x1 logits matrix is always exactly 0.
             if batch["input_ids"].size(0) < 2:
                 skipped_too_small += 1

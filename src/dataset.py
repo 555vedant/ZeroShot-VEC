@@ -55,5 +55,8 @@ def collate_fn(batch):
         truncation=True,
         max_length=Config.TEXT_MAX_LENGTH
     )
+    
+    # Attach raw texts directly into the dictionary for evaluation matching
+    inputs["raw_texts"] = texts
 
     return inputs
