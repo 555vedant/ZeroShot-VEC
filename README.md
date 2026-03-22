@@ -83,6 +83,3 @@ This works because the model learns the underlying meaning of emotions rather th
 
 ---
 
-## License
-
-MIT
