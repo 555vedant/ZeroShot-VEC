@@ -52,7 +52,9 @@ def evaluate():
                 n_skipped += 1
                 continue
 
-            raw_texts = batch.pop("raw_texts", None)
+            raw_texts = batch.get("raw_texts")
+            if "raw_texts" in batch:
+                del batch["raw_texts"]
             if raw_texts is not None:
                 ground_truth_texts.extend(raw_texts)
 
@@ -73,7 +75,7 @@ def evaluate():
     if not img_emb_list:
         raise RuntimeError(
             f"no embeddings extracted — processed={n_processed}, skipped={n_skipped}.\n"
-            "check pairs.json for invalid paths or collate_fn for silent failures."
+            "check pairs.json image paths. If this is a new machine/session, run preprocess.py once to regenerate valid paths."
         )
 
     img_embs = torch.cat(img_emb_list, dim=0).to(device)   # [N, D]
