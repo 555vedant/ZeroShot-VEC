@@ -73,6 +73,18 @@ def _resolve_image_path(raw_path, wikiart_roots):
             if recovered.exists():
                 return recovered
 
+    # 5) Recover paths that start from a "versions/<n>/..." suffix.
+    marker = "versions/"
+    if marker in lower:
+        suffix = normalized[lower.index(marker):]
+        for root in wikiart_roots:
+            if root.name.isdigit() and root.parent.name == "versions":
+                recovered = (root.parent.parent / suffix).resolve()
+            else:
+                recovered = (root / suffix).resolve()
+            if recovered.exists():
+                return recovered
+
     return None
 
 
@@ -120,5 +132,7 @@ def collate_fn(batch):
         truncation=True,
         max_length=Config.TEXT_MAX_LENGTH
     )
+
+    # Keep raw prompts for label-aware evaluation.
     inputs["raw_texts"] = texts
     return inputs
