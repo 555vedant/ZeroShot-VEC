@@ -72,7 +72,8 @@ def train():
                 continue
 
             # Remove raw_texts since they are strings and cannot be moved to GPU
-            batch.pop("raw_texts", None)
+            if "raw_texts" in batch:
+                del batch["raw_texts"]
 
             # Contrastive CE with a 1x1 logits matrix is always exactly 0.
             if batch["input_ids"].size(0) < 2:

@@ -52,7 +52,11 @@ def evaluate():
                 continue
 
             # Extract raw texts for robust accuracy matching
-            texts = batch.pop("raw_texts", None)
+            texts = None
+            if "raw_texts" in batch:
+                texts = batch["raw_texts"]
+                del batch["raw_texts"]
+            
             if texts is not None:
                 all_texts.extend(texts)
 
