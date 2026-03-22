@@ -44,6 +44,8 @@ def evaluate():
     all_txt_embs = []
     all_texts = []
     skipped = 0
+    processed_batches = 0
+    inference_errors = 0
 
     with torch.no_grad():
         for batch in tqdm(loader, desc="Extracting image and text embeddings"):
@@ -60,9 +62,15 @@ def evaluate():
             if texts is not None:
                 all_texts.extend(texts)
 
-            batch = {k: v.to(device) for k, v in batch.items()}
-            
-            img_emb, txt_emb = model(batch)
+            try:
+                batch = {k: v.to(device) for k, v in batch.items()}
+                img_emb, txt_emb = model(batch)
+            except Exception as exc:
+                inference_errors += 1
+                skipped += 1
+                if inference_errors <= 3:
+                    print(f"Warning: failed to process a batch ({exc}).")
+                continue
 
             # normalize embeddings
             img_emb = F.normalize(img_emb, dim=-1)
@@ -70,6 +78,14 @@ def evaluate():
             
             all_img_embs.append(img_emb.cpu())
             all_txt_embs.append(txt_emb.cpu())
+            processed_batches += 1
+
+    if len(all_img_embs) == 0:
+        raise RuntimeError(
+            "No valid embeddings were extracted. "
+            f"Dataset size: {len(dataset)}, processed batches: {processed_batches}, skipped batches: {skipped}. "
+            "Most likely causes: invalid image paths in pairs.json, inaccessible files, or all samples failing in collate_fn."
+        )
 
     print("Stacking embeddings...")
     all_img_embs = torch.cat(all_img_embs, dim=0) # [N, D]
