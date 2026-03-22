@@ -9,8 +9,8 @@ class Config:
     TEXT_MAX_LENGTH = 77
 
     BATCH_SIZE = 32
-    EPOCHS = 1
-    LR = 1e-5
+    EPOCHS = 5
+    LR = 5e-6
     DEVICE = "cuda"
 
     SEARCH_TOP_K = 5
@@ -18,6 +18,6 @@ class Config:
     TEMPERATURE = 0.07
 
     FREEZE_VISION = True
-    FREEZE_TEXT = True
+    FREEZE_TEXT = False
 
     MIXED_PRECISION = True

@@ -73,7 +73,7 @@ def train():
 
             # Keep only tensor fields for the model forward pass.
             if "raw_texts" in batch:
-                batch = {k: v for k, v in batch.items() if k != "raw_texts"}
+                del batch["raw_texts"]
 
             # Contrastive CE with a 1x1 logits matrix is always exactly 0.
             if batch["input_ids"].size(0) < 2:
@@ -89,12 +89,15 @@ def train():
                     loss = contrastive_loss(img_emb, txt_emb)
 
                 scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 img_emb, txt_emb = model(batch)
                 loss = contrastive_loss(img_emb, txt_emb)
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
 
             total_loss += loss.item()
