@@ -71,9 +71,9 @@ def train():
                 skipped_empty += 1
                 continue
 
-            # Remove raw_texts since they are strings and cannot be moved to GPU
+            # Keep only tensor fields for the model forward pass.
             if "raw_texts" in batch:
-                del batch["raw_texts"]
+                batch = {k: v for k, v in batch.items() if k != "raw_texts"}
 
             # Contrastive CE with a 1x1 logits matrix is always exactly 0.
             if batch["input_ids"].size(0) < 2:
