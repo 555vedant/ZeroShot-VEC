@@ -6,7 +6,6 @@ from pathlib import Path
 from utils.helpers import load_json
 from utils.config import Config
 
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -17,17 +16,16 @@ def _resolve_image_path(raw_path):
     if path.is_absolute() and path.exists():
         return path
 
-    # Common case: paths in pairs.json are relative to project root.
     candidate = (PROJECT_ROOT / path).resolve()
     if candidate.exists():
         return candidate
 
-    # Recovery for stale absolute paths from another machine/environment.
+    # fallback for stale absolute paths from another machine
     marker = "data/"
     lower = path_str.lower()
     if marker in lower:
         rel_idx = lower.index(marker)
-        fallback = (PROJECT_ROOT / path_str[rel_idx:]).resolve()
+        fallback = (PROJECT_ROOT / path_str[rel_idx:]).resolve()  # preserve original casing
         if fallback.exists():
             return fallback
 
@@ -37,7 +35,6 @@ def _resolve_image_path(raw_path):
     return None
 
 
-# DATASET
 class ArtDataset(Dataset):
     def __init__(self):
         self.data = load_json(Config.DATA_FILE)
@@ -47,7 +44,6 @@ class ArtDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.data[idx]
-
         image_path = _resolve_image_path(item["image"])
         text = item["text"]
 
@@ -58,24 +54,23 @@ class ArtDataset(Dataset):
             with Image.open(image_path) as img:
                 image = img.convert("RGB")
         except Exception:
-            return None  # skipping bad samples
+            return None
 
-        return {
-            "image": image,
-            "text": text
-        }
+        return {"image": image, "text": text}
 
 
-# GLOBAL PROCESSOR
-processor = CLIPProcessor.from_pretrained(Config.MODEL_NAME)
+def _build_processor():
+    try:
+        return CLIPProcessor.from_pretrained(Config.MODEL_NAME)
+    except Exception as e:
+        raise RuntimeError(f"failed to load CLIP processor ({Config.MODEL_NAME}): {e}")
+
+processor = _build_processor()
 
 
-# COLLATE FUNCTION 
 def collate_fn(batch):
-    # failed samples
     batch = [b for b in batch if b is not None]
-
-    if len(batch) == 0:
+    if not batch:
         return None
 
     images = [item["image"] for item in batch]
@@ -89,8 +84,5 @@ def collate_fn(batch):
         truncation=True,
         max_length=Config.TEXT_MAX_LENGTH
     )
-    
-    # Attach raw texts directly into the dictionary for evaluation matching
     inputs["raw_texts"] = texts
-
     return inputs
