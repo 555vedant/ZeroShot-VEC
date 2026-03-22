@@ -3,8 +3,8 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-
 from pathlib import Path
+
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from src.dataset import ArtDataset, collate_fn
@@ -14,11 +14,11 @@ from utils.config import Config
 
 def evaluate():
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}")
+    print(f"device: {device}")
 
-    print("Loading dataset...")
+    print("loading dataset...")
     dataset = ArtDataset()
-    print(f"Dataset loaded with {len(dataset)} items.")
+    print(f"dataset size: {len(dataset)}")
 
     loader = DataLoader(
         dataset,
@@ -28,118 +28,94 @@ def evaluate():
     )
 
     project_root = Path(__file__).resolve().parent.parent
-    checkpoint_path = project_root / Config.CHECKPOINT_FILE
+    ckpt_path = project_root / Config.CHECKPOINT_FILE
 
-    if not checkpoint_path.exists():
-        raise FileNotFoundError("Model checkpoint not found. Train first.")
+    if not ckpt_path.exists():
+        raise FileNotFoundError(f"checkpoint not found at {ckpt_path} — run training first.")
 
-    print(f"Loading model from '{checkpoint_path}'...")
+    print(f"loading checkpoint: {ckpt_path}")
     model = CLIPFineTuner().to(device)
-    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    model.load_state_dict(torch.load(ckpt_path, map_location=device))
     model.eval()
 
-    print("Extracting embeddings...")
-    
-    all_img_embs = []
-    all_txt_embs = []
-    all_texts = []
-    skipped = 0
-    processed_batches = 0
-    inference_errors = 0
+    img_emb_list = []
+    txt_emb_list = []
+    ground_truth_texts = []
+    n_skipped = 0
+    n_processed = 0
+    n_errors = 0
 
+    print("extracting embeddings...")
     with torch.no_grad():
-        for batch in tqdm(loader, desc="Extracting image and text embeddings"):
+        for batch in tqdm(loader, desc="embed"):
             if batch is None:
-                skipped += 1
+                n_skipped += 1
                 continue
 
-            # Extract raw texts for robust accuracy matching
-            texts = None
-            if "raw_texts" in batch:
-                texts = batch["raw_texts"]
-                del batch["raw_texts"]
-            
-            if texts is not None:
-                all_texts.extend(texts)
+            raw_texts = batch.pop("raw_texts", None)
+            if raw_texts is not None:
+                ground_truth_texts.extend(raw_texts)
 
             try:
                 batch = {k: v.to(device) for k, v in batch.items()}
                 img_emb, txt_emb = model(batch)
-            except Exception as exc:
-                inference_errors += 1
-                skipped += 1
-                if inference_errors <= 3:
-                    print(f"Warning: failed to process a batch ({exc}).")
+            except Exception as e:
+                n_errors += 1
+                n_skipped += 1
+                if n_errors <= 3:
+                    print(f"  batch failed: {e}")
                 continue
 
-            # normalize embeddings
-            img_emb = F.normalize(img_emb, dim=-1)
-            txt_emb = F.normalize(txt_emb, dim=-1)
-            
-            all_img_embs.append(img_emb.cpu())
-            all_txt_embs.append(txt_emb.cpu())
-            processed_batches += 1
+            img_emb_list.append(F.normalize(img_emb, dim=-1).cpu())
+            txt_emb_list.append(F.normalize(txt_emb, dim=-1).cpu())
+            n_processed += 1
 
-    if len(all_img_embs) == 0:
+    if not img_emb_list:
         raise RuntimeError(
-            "No valid embeddings were extracted. "
-            f"Dataset size: {len(dataset)}, processed batches: {processed_batches}, skipped batches: {skipped}. "
-            "Most likely causes: invalid image paths in pairs.json, inaccessible files, or all samples failing in collate_fn."
+            f"no embeddings extracted — processed={n_processed}, skipped={n_skipped}.\n"
+            "check pairs.json for invalid paths or collate_fn for silent failures."
         )
 
-    print("Stacking embeddings...")
-    all_img_embs = torch.cat(all_img_embs, dim=0) # [N, D]
-    all_txt_embs = torch.cat(all_txt_embs, dim=0) # [N, D]
-    
-    N = all_img_embs.shape[0]
-    
-    print("Calculating final accuracy...")
-    i2t_correct = 0
-    t2i_correct = 0
-    total = N
-    
-    # Process in chunks to avoid OOM
-    chunk_size = 1000
-    all_txt_embs = all_txt_embs.to(device)
-    all_img_embs = all_img_embs.to(device)
-    
-    for i in tqdm(range(0, N, chunk_size), desc="Scoring"):
-        end = min(i + chunk_size, N)
-        img_chunk = all_img_embs[i:end]
-        txt_chunk = all_txt_embs[i:end]
-        
-        # Image-to-Text (I2T)
-        logits_i2t = img_chunk @ all_txt_embs.T
-        preds_i2t = logits_i2t.argmax(dim=1).cpu().tolist()
+    img_embs = torch.cat(img_emb_list, dim=0).to(device)   # [N, D]
+    txt_embs = torch.cat(txt_emb_list, dim=0).to(device)   # [N, D]
 
-        # Text-to-Image (T2I)
-        logits_t2i = txt_chunk @ all_img_embs.T
-        preds_t2i = logits_t2i.argmax(dim=1).cpu().tolist()
-        
-        for j in range(len(preds_i2t)):
-            true_idx = i + j
-            pred_txt_idx = preds_i2t[j]
-            pred_img_idx = preds_t2i[j]
-            
-            # Robust match: if the retrieved text/image has the same ground-truth text, it's a correct match
-            if len(all_texts) == N:
-                if all_texts[pred_txt_idx] == all_texts[true_idx]:
-                    i2t_correct += 1
-                if all_texts[pred_img_idx] == all_texts[true_idx]:
-                    t2i_correct += 1
+    N = img_embs.shape[0]
+    has_text_labels = len(ground_truth_texts) == N
+
+    i2t_hits = 0
+    t2i_hits = 0
+    chunk = 1000
+
+    print("scoring...")
+    for start in tqdm(range(0, N, chunk), desc="retrieval"):
+        end = min(start + chunk, N)
+
+        img_chunk = img_embs[start:end]
+        txt_chunk = txt_embs[start:end]
+
+        i2t_preds = (img_chunk @ txt_embs.T).argmax(dim=1).cpu().tolist()
+        t2i_preds = (txt_chunk @ img_embs.T).argmax(dim=1).cpu().tolist()
+
+        for offset in range(len(i2t_preds)):
+            true_idx = start + offset
+
+            if has_text_labels:
+                if ground_truth_texts[i2t_preds[offset]] == ground_truth_texts[true_idx]:
+                    i2t_hits += 1
+                if ground_truth_texts[t2i_preds[offset]] == ground_truth_texts[true_idx]:
+                    t2i_hits += 1
             else:
-                # Fallback to absolute index match
-                if pred_txt_idx == true_idx:
-                    i2t_correct += 1
-                if pred_img_idx == true_idx:
-                    t2i_correct += 1
+                if i2t_preds[offset] == true_idx:
+                    i2t_hits += 1
+                if t2i_preds[offset] == true_idx:
+                    t2i_hits += 1
 
-    i2t_acc = (i2t_correct / total) * 100 if total > 0 else 0
-    t2i_acc = (t2i_correct / total) * 100 if total > 0 else 0
+    i2t_acc = i2t_hits / N * 100
+    t2i_acc = t2i_hits / N * 100
 
-    print(f"\nZero-shot Retrieval Results: Valid samples: {total} | Skipped: {skipped}")
-    print(f"Image-to-Text (I2T) Accuracy: {i2t_acc:.2f}%")
-    print(f"Text-to-Image (T2I) Accuracy: {t2i_acc:.2f}%")
+    print(f"\nresults — N={N}, skipped={n_skipped}")
+    print(f"  I2T accuracy: {i2t_acc:.2f}%")
+    print(f"  T2I accuracy: {t2i_acc:.2f}%")
 
 
 if __name__ == "__main__":
