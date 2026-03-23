@@ -185,7 +185,7 @@ class ArtDataset(Dataset):
         }
 
 
-processor = CLIPProcessor.from_pretrained(Config.MODEL_NAME)
+processor = CLIPProcessor.from_pretrained(Config.MODEL_NAME, use_fast=False)
 
 
 def collate_fn(batch):
