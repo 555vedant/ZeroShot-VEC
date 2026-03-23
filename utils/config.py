@@ -74,7 +74,7 @@ class Config:
     TEMPERATURE = 0.07
 
     # improved
-    FREEZE_VISION = False
+    FREEZE_VISION = True
     FREEZE_TEXT = False
 
     MIXED_PRECISION = True
