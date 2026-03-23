@@ -1,13 +1,14 @@
 import sys
 import torch
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from pathlib import Path
+import random
+from PIL import Image
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from src.dataset import ArtDataset, collate_fn, processor
+from src.dataset import ArtDataset, collate_fn, processor, format_emotion_prompt, resolve_image_path
 from src.model import CLIPFineTuner
 from utils.config import Config
 
@@ -22,70 +23,151 @@ def _to_abs(path_value):
     return (PROJECT_ROOT / path).resolve()
 
 
-PROMPT_PREFIX = "a painting that evokes "
-EMOTIONS = [
-    "amusement",
-    "anger",
-    "awe",
-    "contentment",
-    "disgust",
-    "excitement",
-    "fear",
-    "sadness",
-    "something_else",
-]
-EMOTION_TO_INDEX = {emotion: idx for idx, emotion in enumerate(EMOTIONS)}
+def _binary_metrics(scores, labels, threshold=0.5):
+    preds = (scores >= threshold).long()
+
+    tp = ((preds == 1) & (labels == 1)).sum().item()
+    tn = ((preds == 0) & (labels == 0)).sum().item()
+    fp = ((preds == 1) & (labels == 0)).sum().item()
+    fn = ((preds == 0) & (labels == 1)).sum().item()
+
+    total = labels.numel()
+    accuracy = (tp + tn) / max(total, 1)
+    precision = tp / max(tp + fp, 1)
+    recall = tp / max(tp + fn, 1)
+    f1 = 2 * precision * recall / max(precision + recall, 1e-12)
+
+    return {
+        "accuracy": accuracy,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "tp": tp,
+        "tn": tn,
+        "fp": fp,
+        "fn": fn,
+    }
 
 
-def _emotion_index_from_text(text):
-    text = text.strip().lower()
-    if text.startswith(PROMPT_PREFIX):
-        text = text[len(PROMPT_PREFIX):].strip()
-    return EMOTION_TO_INDEX.get(text)
+def _auroc(scores, labels):
+    positives = (labels == 1).sum().item()
+    negatives = (labels == 0).sum().item()
+
+    if positives == 0 or negatives == 0:
+        return float("nan")
+
+    pairs = list(zip(scores.tolist(), labels.tolist()))
+    pairs.sort(key=lambda x: x[0], reverse=True)
+
+    tpr_points = [0.0]
+    fpr_points = [0.0]
+    tp = 0
+    fp = 0
+
+    for _, label in pairs:
+        if label == 1:
+            tp += 1
+        else:
+            fp += 1
+
+        tpr_points.append(tp / positives)
+        fpr_points.append(fp / negatives)
+
+    auc = 0.0
+    for i in range(1, len(tpr_points)):
+        x1, x2 = fpr_points[i - 1], fpr_points[i]
+        y1, y2 = tpr_points[i - 1], tpr_points[i]
+        auc += (x2 - x1) * (y1 + y2) * 0.5
+
+    return auc
 
 
-def _balanced_accuracy(preds, labels, num_classes):
-    recalls = []
-    for class_idx in range(num_classes):
-        class_mask = labels == class_idx
-        class_count = class_mask.sum().item()
-        if class_count == 0:
-            continue
+def _ranking_metrics(model, dataset, candidate_emotions, device):
+    if len(dataset.image_to_emotions) == 0 or len(candidate_emotions) == 0:
+        return {"hit_at_1": 0.0, "hit_at_3": 0.0, "mrr": 0.0, "images": 0}
 
-        class_recall = (preds[class_mask] == labels[class_mask]).float().mean().item()
-        recalls.append(class_recall)
-
-    if not recalls:
-        return 0.0
-    return sum(recalls) / len(recalls)
-
-
-def _build_class_text_embeddings(model, device):
-    prompts = [f"{PROMPT_PREFIX}{emotion}" for emotion in EMOTIONS]
+    candidate_prompts = [format_emotion_prompt(e) for e in candidate_emotions]
     text_inputs = processor(
-        text=prompts,
+        text=candidate_prompts,
         return_tensors="pt",
         padding="max_length",
         truncation=True,
         max_length=Config.TEXT_MAX_LENGTH,
     )
-
     text_inputs = {k: v.to(device) for k, v in text_inputs.items()}
+
     with torch.no_grad():
-        class_text_emb = model.model.get_text_features(
+        text_emb = model.encode_text(
             input_ids=text_inputs["input_ids"],
             attention_mask=text_inputs["attention_mask"],
         )
-    return F.normalize(class_text_emb, dim=-1)
+
+    hit1 = 0
+    hit3 = 0
+    mrr = 0.0
+    image_count = 0
+
+    for image_key, true_emotions in dataset.image_to_emotions.items():
+        image_path = resolve_image_path(image_key)
+
+        if image_path is None:
+            continue
+
+        try:
+            with Image.open(image_path) as img:
+                image = img.convert("RGB")
+        except Exception:
+            continue
+
+        inputs = processor(images=image, return_tensors="pt")
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+
+        with torch.no_grad():
+            image_emb = model.encode_images(pixel_values=inputs["pixel_values"])
+
+        scores = (image_emb @ text_emb.T).squeeze(0)
+        ranked_idx = torch.argsort(scores, descending=True).tolist()
+        ranked_emotions = [candidate_emotions[i] for i in ranked_idx]
+
+        image_count += 1
+        if ranked_emotions[0] in true_emotions:
+            hit1 += 1
+        if any(e in true_emotions for e in ranked_emotions[:3]):
+            hit3 += 1
+
+        reciprocal = 0.0
+        for rank, emotion in enumerate(ranked_emotions, start=1):
+            if emotion in true_emotions:
+                reciprocal = 1.0 / rank
+                break
+        mrr += reciprocal
+
+    if image_count == 0:
+        return {"hit_at_1": 0.0, "hit_at_3": 0.0, "mrr": 0.0, "images": 0}
+
+    return {
+        "hit_at_1": hit1 / image_count,
+        "hit_at_3": hit3 / image_count,
+        "mrr": mrr / image_count,
+        "images": image_count,
+    }
 
 
 def evaluate():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 
-    print("Loading dataset...")
-    dataset = ArtDataset()
-    print(f"Dataset loaded with {len(dataset)} items.")
+    split_seed = getattr(Config, "SPLIT_SEED", 42)
+    val_split = getattr(Config, "VAL_SPLIT", 0.2)
+
+    print("Loading validation split...")
+    dataset = ArtDataset(split="val", val_ratio=val_split, split_seed=split_seed)
+    full_dataset = ArtDataset(split="all", val_ratio=val_split, split_seed=split_seed)
+    candidate_emotions = full_dataset.emotions
+    print(f"Validation pairs: {len(dataset)} | Unique images: {len(dataset.image_to_emotions)}")
+
+    if len(dataset) == 0:
+        raise RuntimeError("Validation split is empty. Increase dataset size or reduce VAL_SPLIT.")
 
     loader = DataLoader(
         dataset,
@@ -104,97 +186,107 @@ def evaluate():
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
     model.eval()
 
-    print("Extracting embeddings...")
-    image_embeddings = []
-    text_embeddings = []
-    label_list = []
+    print("Scoring positive and negative validation pairs...")
+    pos_scores = []
+    neg_scores = []
     skipped_batches = 0
+    rng = random.Random(getattr(Config, "NEGATIVE_SEED", 123) + 99)
 
     with torch.no_grad():
-        for batch in tqdm(loader, desc="Embed"):
+        for batch in tqdm(loader, desc="Eval"):
             if batch is None:
                 skipped_batches += 1
                 continue
 
-            texts = batch.get("raw_texts", [])
-            if "raw_texts" in batch:
-                del batch["raw_texts"]
+            emotions = batch.pop("raw_emotions", None)
+            image_keys = batch.pop("image_keys", None)
+            batch.pop("raw_texts", None)
 
-            labels = [_emotion_index_from_text(text) for text in texts]
-            valid_positions = [idx for idx, label in enumerate(labels) if label is not None]
-            if not valid_positions:
+            if not emotions or not image_keys:
                 skipped_batches += 1
                 continue
 
             batch = {k: v.to(device) for k, v in batch.items()}
-            img_emb, txt_emb = model(batch)
 
-            valid_positions = torch.tensor(valid_positions, device=device)
-            img_emb = F.normalize(img_emb.index_select(0, valid_positions), dim=-1)
-            txt_emb = F.normalize(txt_emb.index_select(0, valid_positions), dim=-1)
+            neg_texts = []
+            for image_key, emotion in zip(image_keys, emotions):
+                neg_emotion = dataset.sample_negative_emotion(
+                    image_key=image_key,
+                    current_emotion=emotion,
+                    rng=rng,
+                )
+                if neg_emotion is None:
+                    neg_emotion = emotion
+                neg_texts.append(format_emotion_prompt(neg_emotion))
 
-            image_embeddings.append(img_emb.cpu())
-            text_embeddings.append(txt_emb.cpu())
-            label_list.extend([labels[idx] for idx in valid_positions.tolist()])
+            neg_inputs = processor(
+                text=neg_texts,
+                return_tensors="pt",
+                padding="max_length",
+                truncation=True,
+                max_length=Config.TEXT_MAX_LENGTH,
+            )
+            neg_inputs = {k: v.to(device) for k, v in neg_inputs.items()}
 
-    if not image_embeddings:
+            pos_logits = model.pair_logits(
+                pixel_values=batch["pixel_values"],
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                temperature=Config.TEMPERATURE,
+            )
+
+            neg_logits = model.pair_logits(
+                pixel_values=batch["pixel_values"],
+                input_ids=neg_inputs["input_ids"],
+                attention_mask=neg_inputs["attention_mask"],
+                temperature=Config.TEMPERATURE,
+            )
+
+            pos_scores.append(torch.sigmoid(pos_logits).cpu())
+            neg_scores.append(torch.sigmoid(neg_logits).cpu())
+
+    if not pos_scores:
         raise RuntimeError(
-            "No valid embeddings extracted. "
+            "No valid evaluation scores extracted. "
             "All batches were skipped, likely due to invalid image paths in pairs.json. "
             "Run preprocess.py once in the current environment and retry."
         )
 
-    image_embeddings = torch.cat(image_embeddings, dim=0).to(device)
-    text_embeddings = torch.cat(text_embeddings, dim=0).to(device)
-    labels = torch.tensor(label_list, dtype=torch.long, device=device)
+    pos_scores = torch.cat(pos_scores, dim=0)
+    neg_scores = torch.cat(neg_scores, dim=0)
 
-    total = labels.numel()
-    num_classes = len(EMOTIONS)
+    scores = torch.cat([pos_scores, neg_scores], dim=0)
+    labels = torch.cat(
+        [
+            torch.ones_like(pos_scores, dtype=torch.long),
+            torch.zeros_like(neg_scores, dtype=torch.long),
+        ],
+        dim=0,
+    )
 
-    print("Scoring class-wise metrics...")
-    class_text_embeddings = _build_class_text_embeddings(model, device)
+    metrics = _binary_metrics(scores=scores, labels=labels, threshold=0.5)
+    auc = _auroc(scores=scores, labels=labels)
 
-    # Image -> Text class prediction using class prompts.
-    i2t_logits = image_embeddings @ class_text_embeddings.T
-    i2t_top1 = i2t_logits.argmax(dim=1)
-    i2t_top2 = i2t_logits.topk(k=2, dim=1).indices
-    i2t_top1_acc = (i2t_top1 == labels).float().mean().item() * 100
-    i2t_top2_acc = (i2t_top2 == labels.unsqueeze(1)).any(dim=1).float().mean().item() * 100
-    i2t_balanced_acc = _balanced_accuracy(i2t_top1, labels, num_classes) * 100
+    ranking = _ranking_metrics(
+        model=model,
+        dataset=dataset,
+        candidate_emotions=candidate_emotions,
+        device=device,
+    )
 
-    # Build class image prototypes, then score Text -> Image class prediction.
-    class_image_prototypes = []
-    class_present = []
-    for class_idx in range(num_classes):
-        class_mask = labels == class_idx
-        if class_mask.any():
-            prototype = F.normalize(image_embeddings[class_mask].mean(dim=0, keepdim=True), dim=-1)
-            class_image_prototypes.append(prototype)
-            class_present.append(True)
-        else:
-            class_image_prototypes.append(torch.zeros((1, image_embeddings.shape[1]), device=device))
-            class_present.append(False)
-
-    class_image_prototypes = torch.cat(class_image_prototypes, dim=0)
-    class_present = torch.tensor(class_present, dtype=torch.bool, device=device)
-
-    t2i_logits = text_embeddings @ class_image_prototypes.T
-    t2i_logits[:, ~class_present] = -1e9
-    t2i_top1 = t2i_logits.argmax(dim=1)
-    t2i_top2 = t2i_logits.topk(k=2, dim=1).indices
-    t2i_top1_acc = (t2i_top1 == labels).float().mean().item() * 100
-    t2i_top2_acc = (t2i_top2 == labels.unsqueeze(1)).any(dim=1).float().mean().item() * 100
-    t2i_balanced_acc = _balanced_accuracy(t2i_top1, labels, num_classes) * 100
-
-    print(f"\nEvaluation Summary: Valid samples={total} | Skipped batches={skipped_batches}")
-    print("Image -> Text (Emotion Class)")
-    print(f"  Top-1 Accuracy: {i2t_top1_acc:.2f}%")
-    print(f"  Top-2 Accuracy: {i2t_top2_acc:.2f}%")
-    print(f"  Balanced Accuracy: {i2t_balanced_acc:.2f}%")
-    print("Text -> Image (Emotion Class)")
-    print(f"  Top-1 Accuracy: {t2i_top1_acc:.2f}%")
-    print(f"  Top-2 Accuracy: {t2i_top2_acc:.2f}%")
-    print(f"  Balanced Accuracy: {t2i_balanced_acc:.2f}%")
+    print(f"\nEvaluation Summary: Skipped batches={skipped_batches}")
+    print("Pair Matching Metrics (Validation)")
+    print(f"  Pos pairs: {len(pos_scores)} | Neg pairs: {len(neg_scores)}")
+    print(f"  Accuracy@0.5: {metrics['accuracy'] * 100:.2f}%")
+    print(f"  Precision@0.5: {metrics['precision'] * 100:.2f}%")
+    print(f"  Recall@0.5: {metrics['recall'] * 100:.2f}%")
+    print(f"  F1@0.5: {metrics['f1'] * 100:.2f}%")
+    print(f"  AUROC: {auc * 100:.2f}%")
+    print("Ranking Metrics (Validation Images)")
+    print(f"  Images evaluated: {ranking['images']}")
+    print(f"  Hit@1: {ranking['hit_at_1'] * 100:.2f}%")
+    print(f"  Hit@3: {ranking['hit_at_3'] * 100:.2f}%")
+    print(f"  MRR: {ranking['mrr']:.4f}")
 
 
 if __name__ == "__main__":
