@@ -50,6 +50,32 @@ class CLIPFineTuner(nn.Module):
                 normalized[k] = v
         return normalized
 
+    @staticmethod
+    def _to_data_parallel_keys(state_dict):
+        converted = OrderedDict()
+        for k, v in state_dict.items():
+            if k.startswith("model.") and not k.startswith("model.module."):
+                converted[k.replace("model.", "model.module.", 1)] = v
+            else:
+                converted[k] = v
+        return converted
+
+    def load_checkpoint_state_dict(self, state_dict):
+        normalized = self.normalize_checkpoint_state_dict(state_dict)
+
+        if self.is_data_parallel():
+            try:
+                self.load_state_dict(normalized)
+                return
+            except RuntimeError:
+                pass
+
+            dp_ready = self._to_data_parallel_keys(normalized)
+            self.load_state_dict(dp_ready)
+            return
+
+        self.load_state_dict(normalized)
+
     def forward(self, batch):
         image_embeds = self.encode_images(batch["pixel_values"])
         text_embeds = self.encode_text(

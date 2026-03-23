@@ -204,7 +204,7 @@ def evaluate():
     print(f"Loading checkpoint: {checkpoint_path}")
     model = CLIPFineTuner().to(device)
     state = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(CLIPFineTuner.normalize_checkpoint_state_dict(state))
+    model.load_checkpoint_state_dict(state)
 
     gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
     if device == "cuda" and getattr(Config, "MULTI_GPU", True) and gpu_count > 1:

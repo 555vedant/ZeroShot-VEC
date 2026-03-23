@@ -33,7 +33,7 @@ class SearchEngine:
 
         self.model = CLIPFineTuner().to(self.device)
         state = torch.load(checkpoint_path, map_location=self.device)
-        self.model.load_state_dict(CLIPFineTuner.normalize_checkpoint_state_dict(state))
+        self.model.load_checkpoint_state_dict(state)
 
         gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
         if self.device == "cuda" and getattr(Config, "MULTI_GPU", True) and gpu_count > 1:

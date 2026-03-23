@@ -67,8 +67,7 @@ def _make_loader(dataset, shuffle, batch_size):
 
 
 def _safe_load_model_state(model, state_dict):
-    normalized = CLIPFineTuner.normalize_checkpoint_state_dict(state_dict)
-    model.load_state_dict(normalized)
+    model.load_checkpoint_state_dict(state_dict)
 
 
 # ---------------------------
