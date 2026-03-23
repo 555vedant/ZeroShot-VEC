@@ -1,7 +1,6 @@
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from torch.cuda.amp import GradScaler, autocast
 import re
 import random
 
@@ -16,6 +15,20 @@ from utils.config import Config
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _make_grad_scaler(use_amp: bool):
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        return torch.amp.GradScaler("cuda", enabled=use_amp)
+
+    return torch.cuda.amp.GradScaler(enabled=use_amp)
+
+
+def _autocast_context(device: str, enabled: bool):
+    if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
+        return torch.amp.autocast(device_type=device, enabled=enabled)
+
+    return torch.cuda.amp.autocast(enabled=enabled)
 
 
 # ---------------------------
@@ -176,9 +189,9 @@ def _run_epoch(model, loader, optimizer, scaler, use_amp, device, dataset, rng, 
             optimizer.zero_grad()
 
         if train_mode:
-            autocast_ctx = autocast(enabled=use_amp)
+            autocast_ctx = _autocast_context(device=device, enabled=use_amp)
         else:
-            autocast_ctx = autocast(enabled=False)
+            autocast_ctx = _autocast_context(device=device, enabled=False)
 
         with torch.set_grad_enabled(train_mode):
             with autocast_ctx:
@@ -270,7 +283,7 @@ def train():
     )
 
     use_amp = Config.MIXED_PRECISION and device == "cuda"
-    scaler = GradScaler(enabled=use_amp)
+    scaler = _make_grad_scaler(use_amp=use_amp)
 
     model.train()
 

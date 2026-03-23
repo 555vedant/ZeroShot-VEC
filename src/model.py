@@ -1,5 +1,6 @@
 import torch.nn as nn
 import torch.nn.functional as F
+import torch
 from transformers import CLIPModel
 from utils.config import Config
 
@@ -26,8 +27,33 @@ class CLIPFineTuner(nn.Module):
 
         return image_embeds, text_embeds
 
+    @staticmethod
+    def _to_embedding_tensor(output, modality):
+        if isinstance(output, torch.Tensor):
+            return output
+
+        if modality == "image" and hasattr(output, "image_embeds"):
+            return output.image_embeds
+
+        if modality == "text" and hasattr(output, "text_embeds"):
+            return output.text_embeds
+
+        if hasattr(output, "pooler_output") and output.pooler_output is not None:
+            return output.pooler_output
+
+        if hasattr(output, "last_hidden_state") and output.last_hidden_state is not None:
+            return output.last_hidden_state[:, 0, :]
+
+        if isinstance(output, (tuple, list)) and output:
+            first = output[0]
+            if isinstance(first, torch.Tensor):
+                return first
+
+        raise TypeError(f"Unsupported {modality} output type: {type(output)!r}")
+
     def encode_images(self, pixel_values):
         embeds = self.model.get_image_features(pixel_values=pixel_values)
+        embeds = self._to_embedding_tensor(embeds, modality="image")
         return F.normalize(embeds, dim=-1)
 
     def encode_text(self, input_ids, attention_mask):
@@ -35,6 +61,7 @@ class CLIPFineTuner(nn.Module):
             input_ids=input_ids,
             attention_mask=attention_mask,
         )
+        embeds = self._to_embedding_tensor(embeds, modality="text")
         return F.normalize(embeds, dim=-1)
 
     def pair_logits(self, pixel_values, input_ids, attention_mask, temperature=None):
