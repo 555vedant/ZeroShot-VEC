@@ -12,6 +12,16 @@ from src.model import CLIPFineTuner
 from utils.config import Config
 
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _to_abs(path_value):
+    path = Path(path_value)
+    if path.is_absolute():
+        return path
+    return (PROJECT_ROOT / path).resolve()
+
+
 PROMPT_PREFIX = "a painting that evokes "
 EMOTIONS = [
     "amusement",
@@ -84,8 +94,7 @@ def evaluate():
         collate_fn=collate_fn
     )
 
-    project_root = Path(__file__).resolve().parent.parent
-    checkpoint_path = project_root / Config.CHECKPOINT_FILE
+    checkpoint_path = _to_abs(Config.CHECKPOINT_FILE)
 
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found at: {checkpoint_path}")

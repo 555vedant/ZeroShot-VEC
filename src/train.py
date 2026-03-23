@@ -12,6 +12,16 @@ from src.model import CLIPFineTuner
 from utils.config import Config
 
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _to_abs(path_value):
+    path = Path(path_value)
+    if path.is_absolute():
+        return path
+    return (PROJECT_ROOT / path).resolve()
+
+
 # LOSS 
 def contrastive_loss(img, txt):
     img = F.normalize(img, dim=-1)
@@ -120,7 +130,7 @@ def train():
         )
 
     # SAVE MODEL
-    checkpoint_path = Path(__file__).resolve().parent.parent / Config.CHECKPOINT_FILE
+    checkpoint_path = _to_abs(Config.CHECKPOINT_FILE)
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
 
     torch.save(model.state_dict(), checkpoint_path)
