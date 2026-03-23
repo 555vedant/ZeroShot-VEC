@@ -67,7 +67,7 @@ class Config:
     # TRAINING
     # ---------------------------
     BATCH_SIZE = 32
-    EPOCHS = 5
+    EPOCHS = 3
     LR = 5e-6
     DEVICE = "cuda"
 
