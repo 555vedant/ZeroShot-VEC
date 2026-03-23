@@ -2,7 +2,6 @@ from PIL import Image
 from torch.utils.data import Dataset
 from transformers import CLIPProcessor
 from pathlib import Path
-import os
 
 from utils.helpers import load_json
 from utils.config import Config
@@ -10,39 +9,14 @@ from utils.config import Config
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
-def _find_wikiart_roots():
-    roots = []
-
-    for env_name in ("WIKIART_ROOT", "WIKIART_DATA_ROOT"):
-        env_val = os.environ.get(env_name)
-        if env_val:
-            p = Path(env_val)
-            if p.exists():
-                roots.append(p)
-
-    for p in (
-        Path.home() / ".cache" / "kagglehub" / "datasets" / "steubk" / "wikiart",
-        Path("/content/.cache/kagglehub/datasets/steubk/wikiart"),
-    ):
-        if p.exists():
-            versions_dir = p / "versions"
-            if versions_dir.exists():
-                versions = [x for x in versions_dir.iterdir() if x.is_dir()]
-                roots.extend(sorted(versions, reverse=True))
-            roots.append(p)
-
-    unique_roots = []
-    seen = set()
-    for r in roots:
-        rr = r.resolve()
-        if rr not in seen:
-            seen.add(rr)
-            unique_roots.append(rr)
-
-    return unique_roots
+def _to_abs(path_value):
+    path = Path(path_value)
+    if path.is_absolute():
+        return path
+    return (PROJECT_ROOT / path).resolve()
 
 
-def _resolve_image_path(raw_path, wikiart_roots):
+def resolve_image_path(raw_path):
     raw_str = str(raw_path).strip()
     if not raw_str:
         return None
@@ -58,8 +32,9 @@ def _resolve_image_path(raw_path, wikiart_roots):
     if p.exists():
         return p.resolve()
 
-    # 3) Relative to project root.
-    candidate = (PROJECT_ROOT / p).resolve()
+    # 3) Relative to configured WikiArt base path.
+    base_path = _to_abs(Config.BASE_PATH)
+    candidate = (base_path / p).resolve()
     if candidate.exists():
         return candidate
 
@@ -68,20 +43,16 @@ def _resolve_image_path(raw_path, wikiart_roots):
     marker = "wikiart/"
     if marker in lower:
         suffix = normalized[lower.index(marker) + len(marker):]
-        for root in wikiart_roots:
-            recovered = (root / suffix).resolve()
-            if recovered.exists():
-                return recovered
+        recovered = (base_path / suffix).resolve()
+        if recovered.exists():
+            return recovered
 
-    # 5) Recover paths that start from a "versions/<n>/..." suffix.
-    marker = "versions/"
-    if marker in lower:
-        suffix = normalized[lower.index(marker):]
-        for root in wikiart_roots:
-            if root.name.isdigit() and root.parent.name == "versions":
-                recovered = (root.parent.parent / suffix).resolve()
-            else:
-                recovered = (root / suffix).resolve()
+    # 5) If Config.BASE_PATH points to dataset root, try latest versions/<n> subfolder.
+    versions_dir = base_path / "versions"
+    if versions_dir.exists():
+        version_dirs = [d for d in versions_dir.iterdir() if d.is_dir()]
+        for version_dir in sorted(version_dirs, reverse=True):
+            recovered = (version_dir / normalized).resolve()
             if recovered.exists():
                 return recovered
 
@@ -90,15 +61,14 @@ def _resolve_image_path(raw_path, wikiart_roots):
 
 class ArtDataset(Dataset):
     def __init__(self):
-        self.data = load_json(Config.DATA_FILE)
-        self.wikiart_roots = _find_wikiart_roots()
+        self.data = load_json(_to_abs(Config.DATA_FILE))
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
         item = self.data[idx]
-        image_path = _resolve_image_path(item["image"], self.wikiart_roots)
+        image_path = resolve_image_path(item["image"])
         text = item["text"]
 
         if image_path is None:

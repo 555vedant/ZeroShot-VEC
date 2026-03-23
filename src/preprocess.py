@@ -4,17 +4,20 @@ import shutil
 import pandas as pd
 from pathlib import Path
 import kagglehub
+import sys
+
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
+from utils.config import Config
 
 
 # CONFIG
 TOP_K = 2
-OUTPUT_FILE = "pairs.json"
 MAX_IMAGES = 40000   
 MAX_ROWS = 40000
 CLEAN_KAGGLE_CACHE = False
 
 PROMPT_TEMPLATE = "a painting that evokes {}"
-
 EMOTIONS = [
     "amusement",
     "anger",
@@ -24,27 +27,44 @@ EMOTIONS = [
     "excitement",
     "fear",
     "sadness",
-    "something_else"
+    "something_else",
 ]
 
 
-# DOWNLOAD DATASETS
-def download_datasets():
-    wikiart_path = kagglehub.dataset_download("steubk/wikiart")
-    artemis_path = kagglehub.dataset_download("samamostafa03/artemis-dataset")
+def _find_file(root: Path, name: str) -> Path:
+    direct = root / name
+    if direct.exists():
+        return direct
+
+    matches = list(root.rglob(name))
+    if not matches:
+        raise FileNotFoundError(f"Could not find '{name}' under {root}")
+    return matches[0]
+
+
+def get_dataset_roots():
+    wikiart_root = Config.BASE_PATH
+    artemis_root = Config.ARTEMIS_PATH
+
+    if wikiart_root.exists() and artemis_root.exists():
+        print("Using dataset paths from Config")
+        print("WikiArt path:", wikiart_root)
+        print("ArtEmis path:", artemis_root)
+        return wikiart_root, artemis_root
+
+    print("Config paths not found. Downloading via kagglehub...")
+    wikiart_path = Path(kagglehub.dataset_download("steubk/wikiart"))
+    artemis_path = Path(kagglehub.dataset_download("samamostafa03/artemis-dataset"))
 
     print("WikiArt path:", wikiart_path)
     print("ArtEmis path:", artemis_path)
-
-    return Path(wikiart_path), Path(artemis_path)
+    return wikiart_path, artemis_path
 
 
 # IMAGE INDEX (USING classes.csv)
 def build_image_index(wikiart_root):
-    csv_path = wikiart_root / "classes.csv"
-
-    if not csv_path.exists():
-        raise FileNotFoundError("classes.csv not found")
+    csv_path = _find_file(wikiart_root, "classes.csv")
+    data_root = csv_path.parent
 
     df = pd.read_csv(csv_path)
 
@@ -54,15 +74,14 @@ def build_image_index(wikiart_root):
         if i >= MAX_IMAGES:
             break
 
-        file_path = row["filename"]  # full relative path
-        full_path = wikiart_root / file_path
+        file_path = str(row["filename"]).replace("\\", "/")
+        full_path = data_root / file_path
 
         if not full_path.exists():
             continue
 
         key = Path(file_path).stem.lower()
-
-        image_map[key] = str(full_path)
+        image_map[key] = file_path
 
     print(f"Indexed {len(image_map)} images")
     return image_map
@@ -70,12 +89,10 @@ def build_image_index(wikiart_root):
 
 # LOAD ARTEMIS CSV
 def load_artemis_csv(artemis_root):
-    for p in artemis_root.rglob("image-emotion-histogram.csv"):
-        df = pd.read_csv(p)
-        print("CSV loaded:", p)
-        return df
-
-    raise FileNotFoundError("image-emotion-histogram.csv not found")
+    csv_path = _find_file(artemis_root, "image-emotion-histogram.csv")
+    df = pd.read_csv(csv_path)
+    print("CSV loaded:", csv_path)
+    return df
 
 
 # PARSE EMOTIONS
@@ -89,7 +106,7 @@ def get_top_emotions(row, k=2):
 
 # PREPROCESSING
 def preprocess():
-    wikiart_root, artemis_root = download_datasets()
+    wikiart_root, artemis_root = get_dataset_roots()
 
     print("Building image index using classes.csv...")
     image_map = build_image_index(wikiart_root)
@@ -131,16 +148,12 @@ def preprocess():
     print(f"Skipped: {skipped}")
     print(f"Total pairs: {len(pairs)}")
 
-    # save
-    output_path = Path("data/processed")
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    with open(output_path / OUTPUT_FILE, "w") as f:
+    Config.DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(Config.DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(pairs, f)
 
-    print("Saved to:", output_path / OUTPUT_FILE)
+    print("Saved to:", Config.DATA_FILE)
 
-    # Keep cache by default because JSON stores absolute image paths from this location.
     if CLEAN_KAGGLE_CACHE:
         cache_path = Path.home() / ".cache" / "kagglehub"
         print(f"Cleaning dataset cache at: {cache_path}")

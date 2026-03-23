@@ -5,20 +5,26 @@ from pathlib import Path
 from transformers import CLIPProcessor
 
 from src.model import CLIPFineTuner
+from src.dataset import resolve_image_path
 from utils.helpers import load_json
 from utils.config import Config
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _to_abs(path_value):
+    path = Path(path_value)
+    if path.is_absolute():
+        return path
+    return (PROJECT_ROOT / path).resolve()
 
 
 class SearchEngine:
     def __init__(self):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        project_root = Path(__file__).resolve().parent.parent
-        checkpoint_path = project_root / Config.CHECKPOINT_FILE
-        if not checkpoint_path.exists():
-            fallback = project_root / "clip_model.pth"
-            checkpoint_path = fallback if fallback.exists() else checkpoint_path
-
+        checkpoint_path = _to_abs(Config.CHECKPOINT_FILE)
         if not checkpoint_path.exists():
             raise FileNotFoundError(
                 f"Checkpoint not found at {checkpoint_path}. Run training first to create the model file."
@@ -30,7 +36,7 @@ class SearchEngine:
 
         self.processor = CLIPProcessor.from_pretrained(Config.MODEL_NAME)
 
-        raw_data = load_json(Config.DATA_FILE)
+        raw_data = load_json(_to_abs(Config.DATA_FILE))
         self.data = self._build_unique_image_records(raw_data)
 
         if len(self.data) == 0:
@@ -61,7 +67,9 @@ class SearchEngine:
 
         with torch.no_grad():
             for item in self.data:
-                image_path = item["image"]
+                image_path = resolve_image_path(item["image"])
+                if image_path is None:
+                    continue
 
                 try:
                     with Image.open(image_path) as img:
@@ -74,7 +82,7 @@ class SearchEngine:
 
                 out = self.model.model.get_image_features(**inputs)
                 embs.append(out)
-                kept.append(item)
+                kept.append({"image": str(image_path)})
 
         if len(embs) == 0:
             raise RuntimeError(
