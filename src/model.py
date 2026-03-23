@@ -111,8 +111,8 @@ class CLIPFineTuner(nn.Module):
 
     def encode_images(self, pixel_values):
         if self.is_data_parallel():
-            outputs = self.model(pixel_values=pixel_values)
-            embeds = self._to_embedding_tensor(outputs, modality="image")
+            # CLIP full forward requires text inputs; use image feature API for image-only calls.
+            embeds = self.core_model().get_image_features(pixel_values=pixel_values)
         else:
             embeds = self.model.get_image_features(pixel_values=pixel_values)
         embeds = self._to_embedding_tensor(embeds, modality="image")
@@ -120,11 +120,11 @@ class CLIPFineTuner(nn.Module):
 
     def encode_text(self, input_ids, attention_mask):
         if self.is_data_parallel():
-            outputs = self.model(
+            # CLIP full forward expects image inputs too; use text feature API for text-only calls.
+            embeds = self.core_model().get_text_features(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
             )
-            embeds = self._to_embedding_tensor(outputs, modality="text")
         else:
             embeds = self.model.get_text_features(
                 input_ids=input_ids,
@@ -134,8 +134,18 @@ class CLIPFineTuner(nn.Module):
         return F.normalize(embeds, dim=-1)
 
     def pair_logits(self, pixel_values, input_ids, attention_mask, temperature=None):
-        image_embeds = self.encode_images(pixel_values)
-        text_embeds = self.encode_text(input_ids=input_ids, attention_mask=attention_mask)
+        if self.is_data_parallel():
+            # In DataParallel mode, run a single multimodal forward so replicas receive both modalities.
+            outputs = self.model(
+                pixel_values=pixel_values,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            )
+            image_embeds = F.normalize(self._to_embedding_tensor(outputs, modality="image"), dim=-1)
+            text_embeds = F.normalize(self._to_embedding_tensor(outputs, modality="text"), dim=-1)
+        else:
+            image_embeds = self.encode_images(pixel_values)
+            text_embeds = self.encode_text(input_ids=input_ids, attention_mask=attention_mask)
 
         if temperature is None:
             scale = self.core_model().logit_scale.exp().clamp(max=100)
