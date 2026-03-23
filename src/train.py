@@ -11,6 +11,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from src.dataset import ArtDataset, collate_fn, processor, format_emotion_prompt
 from src.model import CLIPFineTuner
+from src.preprocess import preprocess
 from utils.config import Config
 
 
@@ -231,6 +232,12 @@ def train():
     train_dataset = ArtDataset(split="train", val_ratio=val_split, split_seed=split_seed)
     val_dataset = ArtDataset(split="val", val_ratio=val_split, split_seed=split_seed)
 
+    if len(train_dataset) == 0:
+        print("No valid training pairs found. Rebuilding pairs.json via preprocess()...")
+        preprocess()
+        train_dataset = ArtDataset(split="train", val_ratio=val_split, split_seed=split_seed)
+        val_dataset = ArtDataset(split="val", val_ratio=val_split, split_seed=split_seed)
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=Config.BATCH_SIZE,
@@ -246,7 +253,10 @@ def train():
     )
 
     if len(train_dataset) == 0:
-        raise RuntimeError("Training split is empty. Check pairs.json generation.")
+        raise RuntimeError(
+            "Training split is empty after rebuild. Dataset paths are likely invalid in this runtime. "
+            "Run preprocess.py and verify Config.BASE_PATH points to mounted WikiArt data."
+        )
 
     model = CLIPFineTuner().to(device)
 

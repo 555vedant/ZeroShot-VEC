@@ -81,16 +81,32 @@ class ArtDataset(Dataset):
         all_data = load_json(_to_abs(Config.DATA_FILE))
         grouped = defaultdict(list)
 
+        path_cache = {}
+
         for item in all_data:
             image_key = str(item.get("image", "")).strip()
+            image_rel = str(item.get("image_rel", "")).strip()
             text = str(item.get("text", "")).strip()
             if not image_key or not text:
+                continue
+
+            resolved = path_cache.get((image_key, image_rel))
+            if resolved is None:
+                resolved_path = resolve_image_path(image_key)
+                if resolved_path is None and image_rel:
+                    resolved_path = resolve_image_path(image_rel)
+                resolved = str(resolved_path) if resolved_path is not None else ""
+                path_cache[(image_key, image_rel)] = resolved
+
+            if not resolved:
                 continue
 
             emotion = normalize_emotion_text(text)
             grouped[image_key].append(
                 {
                     "image": image_key,
+                    "image_rel": image_rel,
+                    "image_resolved": resolved,
                     "text": text,
                     "emotion": emotion,
                     "image_key": image_key,
@@ -126,6 +142,8 @@ class ArtDataset(Dataset):
             }
         )
 
+        self.valid_count = len(self.data)
+
     def __len__(self):
         return len(self.data)
 
@@ -145,12 +163,12 @@ class ArtDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.data[idx]
-        image_path = resolve_image_path(item["image"])
+        image_path = Path(item["image_resolved"])
         text = item["text"]
         emotion = item.get("emotion")
         image_key = item.get("image_key", item["image"])
 
-        if image_path is None:
+        if not image_path.exists():
             return None
 
         try:
