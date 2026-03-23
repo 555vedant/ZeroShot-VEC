@@ -81,7 +81,10 @@ def build_image_index(wikiart_root):
             continue
 
         key = Path(file_path).stem.lower()
-        image_map[key] = file_path
+        image_map[key] = {
+            "abs_path": str(full_path.resolve()),
+            "rel_path": file_path,
+        }
 
     print(f"Indexed {len(image_map)} images")
     return image_map
@@ -134,13 +137,14 @@ def preprocess():
             continue
 
         matched += 1
-        image_path = image_map[image_id]
+        image_info = image_map[image_id]
 
         emotions = get_top_emotions(row, TOP_K)
 
         for emotion in emotions:
             pairs.append({
-                "image": image_path,
+                "image": image_info["abs_path"],
+                "image_rel": image_info["rel_path"],
                 "text": PROMPT_TEMPLATE.format(emotion)
             })
 
