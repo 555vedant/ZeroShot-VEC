@@ -23,6 +23,30 @@ def _to_abs(path_value):
     return (PROJECT_ROOT / path).resolve()
 
 
+def _move_to_device(batch, device, non_blocking):
+    return {k: v.to(device, non_blocking=non_blocking) for k, v in batch.items()}
+
+
+def _make_loader(dataset, batch_size):
+    num_workers = int(getattr(Config, "NUM_WORKERS", 2))
+    pin_memory = bool(getattr(Config, "PIN_MEMORY", True)) and torch.cuda.is_available()
+    persistent_workers = bool(getattr(Config, "PERSISTENT_WORKERS", True)) and num_workers > 0
+
+    kwargs = {
+        "batch_size": batch_size,
+        "shuffle": False,
+        "collate_fn": collate_fn,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+        "persistent_workers": persistent_workers,
+    }
+
+    if num_workers > 0:
+        kwargs["prefetch_factor"] = int(getattr(Config, "PREFETCH_FACTOR", 2))
+
+    return DataLoader(dataset, **kwargs)
+
+
 def _binary_metrics(scores, labels, threshold=0.5):
     preds = (scores >= threshold).long()
 
@@ -156,6 +180,7 @@ def _ranking_metrics(model, dataset, candidate_emotions, device):
 def evaluate():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
+    non_blocking = bool(getattr(Config, "NON_BLOCKING", True))
 
     split_seed = getattr(Config, "SPLIT_SEED", 42)
     val_split = getattr(Config, "VAL_SPLIT", 0.2)
@@ -169,12 +194,7 @@ def evaluate():
     if len(dataset) == 0:
         raise RuntimeError("Validation split is empty. Increase dataset size or reduce VAL_SPLIT.")
 
-    loader = DataLoader(
-        dataset,
-        batch_size=Config.BATCH_SIZE,
-        shuffle=False,
-        collate_fn=collate_fn
-    )
+    loader = _make_loader(dataset, batch_size=getattr(Config, "EVAL_BATCH_SIZE", Config.BATCH_SIZE))
 
     checkpoint_path = _to_abs(Config.CHECKPOINT_FILE)
 
@@ -183,7 +203,14 @@ def evaluate():
 
     print(f"Loading checkpoint: {checkpoint_path}")
     model = CLIPFineTuner().to(device)
-    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    state = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(CLIPFineTuner.normalize_checkpoint_state_dict(state))
+
+    gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    if device == "cuda" and getattr(Config, "MULTI_GPU", True) and gpu_count > 1:
+        model.enable_data_parallel()
+        print(f"Evaluation using DataParallel on {gpu_count} GPUs")
+
     model.eval()
 
     print("Scoring positive and negative validation pairs...")
@@ -206,7 +233,7 @@ def evaluate():
                 skipped_batches += 1
                 continue
 
-            batch = {k: v.to(device) for k, v in batch.items()}
+            batch = _move_to_device(batch, device=device, non_blocking=non_blocking)
 
             neg_texts = []
             for image_key, emotion in zip(image_keys, emotions):
@@ -226,7 +253,7 @@ def evaluate():
                 truncation=True,
                 max_length=Config.TEXT_MAX_LENGTH,
             )
-            neg_inputs = {k: v.to(device) for k, v in neg_inputs.items()}
+            neg_inputs = {k: v.to(device, non_blocking=non_blocking) for k, v in neg_inputs.items()}
 
             pos_logits = model.pair_logits(
                 pixel_values=batch["pixel_values"],

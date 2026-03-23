@@ -31,6 +31,46 @@ def _autocast_context(device: str, enabled: bool):
     return torch.cuda.amp.autocast(enabled=enabled)
 
 
+def _setup_cuda_backend():
+    if not torch.cuda.is_available():
+        return
+
+    torch.backends.cudnn.benchmark = True
+    if hasattr(torch.backends.cuda.matmul, "allow_tf32"):
+        torch.backends.cuda.matmul.allow_tf32 = bool(getattr(Config, "TF32", True))
+    if hasattr(torch.backends.cudnn, "allow_tf32"):
+        torch.backends.cudnn.allow_tf32 = bool(getattr(Config, "TF32", True))
+
+
+def _move_to_device(batch, device, non_blocking):
+    return {k: v.to(device, non_blocking=non_blocking) for k, v in batch.items()}
+
+
+def _make_loader(dataset, shuffle, batch_size):
+    num_workers = int(getattr(Config, "NUM_WORKERS", 2))
+    pin_memory = bool(getattr(Config, "PIN_MEMORY", True)) and torch.cuda.is_available()
+    persistent_workers = bool(getattr(Config, "PERSISTENT_WORKERS", True)) and num_workers > 0
+
+    kwargs = {
+        "batch_size": batch_size,
+        "shuffle": shuffle,
+        "collate_fn": collate_fn,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+        "persistent_workers": persistent_workers,
+    }
+
+    if num_workers > 0:
+        kwargs["prefetch_factor"] = int(getattr(Config, "PREFETCH_FACTOR", 2))
+
+    return DataLoader(dataset, **kwargs)
+
+
+def _safe_load_model_state(model, state_dict):
+    normalized = CLIPFineTuner.normalize_checkpoint_state_dict(state_dict)
+    model.load_state_dict(normalized)
+
+
 # ---------------------------
 # PATH HELPERS
 # ---------------------------
@@ -82,7 +122,7 @@ def _save_epoch_checkpoint(ckpt_dir, epoch, model, optimizer, scaler):
     torch.save(
         {
             "epoch": epoch_number,
-            "model_state_dict": model.state_dict(),
+            "model_state_dict": model.checkpoint_state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "scaler_state_dict": scaler.state_dict(),
             "best_loss": getattr(model, "_best_loss", float("inf")),
@@ -104,7 +144,7 @@ def _try_resume_training(model, optimizer, scaler, device):
 
     state = torch.load(latest, map_location=device)
 
-    model.load_state_dict(state["model_state_dict"])
+    _safe_load_model_state(model, state["model_state_dict"])
     optimizer.load_state_dict(state["optimizer_state_dict"])
 
     if "scaler_state_dict" in state:
@@ -156,7 +196,8 @@ def _build_negative_text_inputs(dataset, image_keys, emotions, device, rng):
         max_length=Config.TEXT_MAX_LENGTH,
     )
 
-    return {k: v.to(device) for k, v in neg_inputs.items()}
+    non_blocking = bool(getattr(Config, "NON_BLOCKING", True))
+    return {k: v.to(device, non_blocking=non_blocking) for k, v in neg_inputs.items()}
 
 
 def _run_epoch(model, loader, optimizer, scaler, use_amp, device, dataset, rng, train_mode):
@@ -168,6 +209,8 @@ def _run_epoch(model, loader, optimizer, scaler, use_amp, device, dataset, rng, 
         model.train()
     else:
         model.eval()
+
+    non_blocking = bool(getattr(Config, "NON_BLOCKING", True))
 
     for step, batch in enumerate(loader):
         if batch is None:
@@ -182,11 +225,11 @@ def _run_epoch(model, loader, optimizer, scaler, use_amp, device, dataset, rng, 
             skipped += 1
             continue
 
-        batch = {k: v.to(device) for k, v in batch.items()}
+        batch = _move_to_device(batch, device=device, non_blocking=non_blocking)
         neg_inputs = _build_negative_text_inputs(dataset, image_keys, emotions, device, rng)
 
         if train_mode:
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
 
         if train_mode:
             autocast_ctx = _autocast_context(device=device, enabled=use_amp)
@@ -238,6 +281,7 @@ def _run_epoch(model, loader, optimizer, scaler, use_amp, device, dataset, rng, 
 # ---------------------------
 def train():
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    _setup_cuda_backend()
 
     split_seed = getattr(Config, "SPLIT_SEED", 42)
     val_split = getattr(Config, "VAL_SPLIT", 0.2)
@@ -251,18 +295,11 @@ def train():
         train_dataset = ArtDataset(split="train", val_ratio=val_split, split_seed=split_seed)
         val_dataset = ArtDataset(split="val", val_ratio=val_split, split_seed=split_seed)
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=Config.BATCH_SIZE,
-        shuffle=True,
-        collate_fn=collate_fn
-    )
-
-    val_loader = DataLoader(
+    train_loader = _make_loader(train_dataset, shuffle=True, batch_size=Config.BATCH_SIZE)
+    val_loader = _make_loader(
         val_dataset,
-        batch_size=Config.BATCH_SIZE,
         shuffle=False,
-        collate_fn=collate_fn,
+        batch_size=getattr(Config, "EVAL_BATCH_SIZE", Config.BATCH_SIZE),
     )
 
     if len(train_dataset) == 0:
@@ -272,6 +309,11 @@ def train():
         )
 
     model = CLIPFineTuner().to(device)
+
+    gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    if device == "cuda" and getattr(Config, "MULTI_GPU", True) and gpu_count > 1:
+        model.enable_data_parallel()
+        print(f"Using DataParallel on {gpu_count} GPUs")
 
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     if trainable_params == 0:
@@ -345,7 +387,7 @@ def train():
             best_loss = val_loss
             best_path = _to_abs(Config.CHECKPOINT_FILE)
             best_path.parent.mkdir(parents=True, exist_ok=True)
-            torch.save(model.state_dict(), best_path)
+            torch.save(model.checkpoint_state_dict(), best_path)
             print(f"Saved BEST model at epoch {epoch + 1}")
 
         # Save checkpoint after best-loss update so resume state is accurate.

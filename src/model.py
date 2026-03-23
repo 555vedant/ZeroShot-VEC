@@ -1,6 +1,7 @@
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
+from collections import OrderedDict
 from transformers import CLIPModel
 from utils.config import Config
 
@@ -17,6 +18,37 @@ class CLIPFineTuner(nn.Module):
         if Config.FREEZE_TEXT:
             for p in self.model.text_model.parameters():
                 p.requires_grad = False
+
+    def enable_data_parallel(self):
+        if isinstance(self.model, nn.DataParallel):
+            return
+        self.model = nn.DataParallel(self.model)
+
+    def is_data_parallel(self):
+        return isinstance(self.model, nn.DataParallel)
+
+    def core_model(self):
+        return self.model.module if self.is_data_parallel() else self.model
+
+    def checkpoint_state_dict(self):
+        state = self.state_dict()
+        if not self.is_data_parallel():
+            return state
+
+        fixed = OrderedDict()
+        for k, v in state.items():
+            fixed[k.replace("model.module.", "model.", 1)] = v
+        return fixed
+
+    @staticmethod
+    def normalize_checkpoint_state_dict(state_dict):
+        normalized = OrderedDict()
+        for k, v in state_dict.items():
+            if k.startswith("model.module."):
+                normalized[k.replace("model.module.", "model.", 1)] = v
+            else:
+                normalized[k] = v
+        return normalized
 
     def forward(self, batch):
         image_embeds = self.encode_images(batch["pixel_values"])
@@ -52,15 +84,26 @@ class CLIPFineTuner(nn.Module):
         raise TypeError(f"Unsupported {modality} output type: {type(output)!r}")
 
     def encode_images(self, pixel_values):
-        embeds = self.model.get_image_features(pixel_values=pixel_values)
+        if self.is_data_parallel():
+            outputs = self.model(pixel_values=pixel_values)
+            embeds = self._to_embedding_tensor(outputs, modality="image")
+        else:
+            embeds = self.model.get_image_features(pixel_values=pixel_values)
         embeds = self._to_embedding_tensor(embeds, modality="image")
         return F.normalize(embeds, dim=-1)
 
     def encode_text(self, input_ids, attention_mask):
-        embeds = self.model.get_text_features(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-        )
+        if self.is_data_parallel():
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            )
+            embeds = self._to_embedding_tensor(outputs, modality="text")
+        else:
+            embeds = self.model.get_text_features(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            )
         embeds = self._to_embedding_tensor(embeds, modality="text")
         return F.normalize(embeds, dim=-1)
 
@@ -69,7 +112,7 @@ class CLIPFineTuner(nn.Module):
         text_embeds = self.encode_text(input_ids=input_ids, attention_mask=attention_mask)
 
         if temperature is None:
-            scale = self.model.logit_scale.exp().clamp(max=100)
+            scale = self.core_model().logit_scale.exp().clamp(max=100)
         else:
             scale = 1.0 / float(temperature)
 
