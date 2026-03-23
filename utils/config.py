@@ -70,6 +70,9 @@ class Config:
     EPOCHS = 3
     LR = 5e-6
     DEVICE = "cuda"
+    VAL_SPLIT = 0.2
+    SPLIT_SEED = 42
+    NEGATIVE_SEED = 123
 
     TEMPERATURE = 0.07
 
