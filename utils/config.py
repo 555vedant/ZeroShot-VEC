@@ -83,6 +83,22 @@ class Config:
     MIXED_PRECISION = True
 
     # ---------------------------
+    # PERFORMANCE
+    # ---------------------------
+    MULTI_GPU = True
+    TF32 = True
+
+    NUM_WORKERS = max(2, min(8, os.cpu_count() or 2))
+    PREFETCH_FACTOR = 4
+    PIN_MEMORY = True
+    PERSISTENT_WORKERS = True
+    NON_BLOCKING = True
+
+    # Separate eval/index batch sizes to keep GPU busy during inference-heavy loops.
+    EVAL_BATCH_SIZE = max(BATCH_SIZE, 64)
+    INDEX_BATCH_SIZE = 128
+
+    # ---------------------------
     # SEARCH
     # ---------------------------
     SEARCH_TOP_K = 5
