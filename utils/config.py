@@ -18,6 +18,15 @@ def is_colab():
         return False
 
 
+def resolve_local_wikiart_path() -> Path:
+    """Prefer existing local WikiArt directory regardless of case."""
+    candidates = [Path("./data/Wikiart"), Path("./data/wikiart")]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
 class Config:
 
     # ---------------------------
@@ -40,7 +49,7 @@ class Config:
         WORK_DIR = Path("/content")
 
     else:
-        BASE_PATH = Path("./data/wikiart")
+        BASE_PATH = resolve_local_wikiart_path()
         ARTEMIS_PATH = Path("./data/artemis")
         WORK_DIR = Path("./data")
 
