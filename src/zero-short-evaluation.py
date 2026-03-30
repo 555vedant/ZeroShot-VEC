@@ -145,10 +145,38 @@ def _resolve_zero_shot_holdout_emotions(train_dataset, all_dataset):
     holdout = sorted(all_emotions - train_emotions)
 
     if not holdout:
-        raise RuntimeError(
-            "No unseen emotions found for strict zero-shot evaluation. "
-           
+        fallback_count = int(getattr(Config, "ZERO_SHOT_FALLBACK_HOLDOUT_COUNT", 3) or 0)
+
+        if fallback_count <= 0:
+            raise RuntimeError(
+                "No unseen emotions found for strict zero-shot evaluation. "
+                "Set Config.ZERO_SHOT_HOLDOUT_EMOTIONS to explicit labels, "
+                "or set Config.ZERO_SHOT_FALLBACK_HOLDOUT_COUNT > 0 to enable deterministic fallback holdout."
+            )
+
+        # Deterministic fallback when strict unseen labels do not exist in the current split.
+        # We pick the least frequent emotions to keep a stable, challenging holdout.
+        freq = defaultdict(int)
+        for record in all_dataset.data:
+            emotion = record.get("emotion")
+            if emotion:
+                freq[emotion] += 1
+
+        ranked = sorted(freq.items(), key=lambda kv: (kv[1], kv[0]))
+        selected = [emotion for emotion, _ in ranked[: min(fallback_count, len(ranked))]]
+
+        if not selected:
+            raise RuntimeError(
+                "No emotions available in dataset to construct a fallback holdout set."
+            )
+
+        print(
+            "Warning: No unseen emotions found for strict zero-shot evaluation. "
+            "Falling back to deterministic holdout from available emotions: "
+            f"{selected}"
         )
+
+        return selected, "fallback_seen_holdout"
 
     return holdout, "derived"
 
