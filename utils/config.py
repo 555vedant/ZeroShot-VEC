@@ -83,6 +83,7 @@ class Config:
     PIN_MEMORY = True
     PERSISTENT_WORKERS = True
     NON_BLOCKING = True
+    DROP_LAST_MULTI_GPU_TRAIN = True
 
     # Separate eval/index batch sizes to keep GPU busy during inference-heavy loops.
     EVAL_BATCH_SIZE = max(BATCH_SIZE, 64)
