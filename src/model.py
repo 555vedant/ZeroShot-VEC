@@ -134,10 +134,37 @@ class CLIPFineTuner(nn.Module):
         return F.normalize(embeds, dim=-1)
 
     def pair_logits(self, pixel_values, input_ids, attention_mask, temperature=None):
-        # Always use feature APIs here to avoid DataParallel gather issues with CLIP forward outputs
-        # (replica-local logits matrices have incompatible shapes on uneven splits).
-        image_embeds = self.encode_images(pixel_values)
-        text_embeds = self.encode_text(input_ids=input_ids, attention_mask=attention_mask)
+        if self.is_data_parallel():
+            gpu_count = max(1, torch.cuda.device_count())
+            batch_size = int(pixel_values.shape[0])
+            balanced = batch_size >= gpu_count and (batch_size % gpu_count == 0)
+
+            if balanced:
+                # Fast path: true DataParallel execution across GPUs.
+                outputs = self.model(
+                    pixel_values=pixel_values,
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                )
+                image_embeds = F.normalize(self._to_embedding_tensor(outputs, modality="image"), dim=-1)
+                text_embeds = F.normalize(self._to_embedding_tensor(outputs, modality="text"), dim=-1)
+            else:
+                # Safe path for uneven final batches that can trigger DP gather shape mismatches.
+                core = self.core_model()
+                image_embeds = F.normalize(
+                    core.get_image_features(pixel_values=pixel_values),
+                    dim=-1,
+                )
+                text_embeds = F.normalize(
+                    core.get_text_features(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                    ),
+                    dim=-1,
+                )
+        else:
+            image_embeds = self.encode_images(pixel_values)
+            text_embeds = self.encode_text(input_ids=input_ids, attention_mask=attention_mask)
 
         if temperature is None:
             scale = self.core_model().logit_scale.exp().clamp(max=100)

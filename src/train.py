@@ -54,7 +54,7 @@ def _move_to_device(batch, device, non_blocking):
     return {k: v.to(device, non_blocking=non_blocking) for k, v in batch.items()}
 
 
-def _make_loader(dataset, shuffle, batch_size):
+def _make_loader(dataset, shuffle, batch_size, drop_last=False):
     num_workers = int(getattr(Config, "NUM_WORKERS", 2))
     pin_memory = bool(getattr(Config, "PIN_MEMORY", True)) and torch.cuda.is_available()
     persistent_workers = bool(getattr(Config, "PERSISTENT_WORKERS", True)) and num_workers > 0
@@ -62,6 +62,7 @@ def _make_loader(dataset, shuffle, batch_size):
     kwargs = {
         "batch_size": batch_size,
         "shuffle": shuffle,
+        "drop_last": bool(drop_last),
         "collate_fn": collate_fn,
         "num_workers": num_workers,
         "pin_memory": pin_memory,
@@ -349,7 +350,15 @@ def train():
             allowed_emotions=seen_emotions,
         )
 
-    train_loader = _make_loader(train_dataset, shuffle=True, batch_size=Config.BATCH_SIZE)
+    gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    train_drop_last = bool(getattr(Config, "DROP_LAST_MULTI_GPU_TRAIN", True)) and device == "cuda" and gpu_count > 1
+
+    train_loader = _make_loader(
+        train_dataset,
+        shuffle=True,
+        batch_size=Config.BATCH_SIZE,
+        drop_last=train_drop_last,
+    )
     val_loader = _make_loader(
         val_dataset,
         shuffle=False,
@@ -364,7 +373,6 @@ def train():
 
     model = CLIPFineTuner().to(device)
 
-    gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
     if device == "cuda" and getattr(Config, "MULTI_GPU", True) and gpu_count > 1:
         model.enable_data_parallel()
         print(f"Using DataParallel on {gpu_count} GPUs")
