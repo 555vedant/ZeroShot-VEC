@@ -134,18 +134,10 @@ class CLIPFineTuner(nn.Module):
         return F.normalize(embeds, dim=-1)
 
     def pair_logits(self, pixel_values, input_ids, attention_mask, temperature=None):
-        if self.is_data_parallel():
-            # In DataParallel mode, run a single multimodal forward so replicas receive both modalities.
-            outputs = self.model(
-                pixel_values=pixel_values,
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-            )
-            image_embeds = F.normalize(self._to_embedding_tensor(outputs, modality="image"), dim=-1)
-            text_embeds = F.normalize(self._to_embedding_tensor(outputs, modality="text"), dim=-1)
-        else:
-            image_embeds = self.encode_images(pixel_values)
-            text_embeds = self.encode_text(input_ids=input_ids, attention_mask=attention_mask)
+        # Always use feature APIs here to avoid DataParallel gather issues with CLIP forward outputs
+        # (replica-local logits matrices have incompatible shapes on uneven splits).
+        image_embeds = self.encode_images(pixel_values)
+        text_embeds = self.encode_text(input_ids=input_ids, attention_mask=attention_mask)
 
         if temperature is None:
             scale = self.core_model().logit_scale.exp().clamp(max=100)

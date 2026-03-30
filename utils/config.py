@@ -92,5 +92,10 @@ class Config:
     SEARCH_TOP_K = 5
 
     # ZERO-SHOT EVALUATION
-    # If set, evaluate.py uses these emotions as holdout labels.
+    # If set, strict zero-shot split uses these as holdout labels.
     ZERO_SHOT_HOLDOUT_EMOTIONS = None
+    # Auto-holdout controls (used only when ZERO_SHOT_HOLDOUT_EMOTIONS is None).
+    ZERO_SHOT_HOLDOUT_RATIO = 0.2
+    ZERO_SHOT_HOLDOUT_MIN_COUNT = 1
+    ZERO_SHOT_MIN_HOLDOUT_EMOTIONS = 1
+    ZERO_SHOT_SPLIT_SEED = SPLIT_SEED

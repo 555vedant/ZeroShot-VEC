@@ -8,7 +8,13 @@ import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from src.dataset import ArtDataset, collate_fn, processor, format_emotion_prompt
+from src.dataset import (
+    ArtDataset,
+    collate_fn,
+    processor,
+    format_emotion_prompt,
+    compute_zero_shot_emotion_split,
+)
 from src.model import CLIPFineTuner
 from src.preprocess import preprocess
 from utils.config import Config
@@ -277,14 +283,50 @@ def train():
     split_seed = getattr(Config, "SPLIT_SEED", 42)
     val_split = getattr(Config, "VAL_SPLIT", 0.2)
 
-    train_dataset = ArtDataset(split="train", val_ratio=val_split, split_seed=split_seed)
-    val_dataset = ArtDataset(split="val", val_ratio=val_split, split_seed=split_seed)
+    all_dataset = ArtDataset(split="all", val_ratio=val_split, split_seed=split_seed)
+    split_plan = compute_zero_shot_emotion_split(all_dataset.data)
+    seen_emotions = split_plan["seen_emotions"]
+    holdout_emotions = split_plan["holdout_emotions"]
+
+    print(
+        "Strict zero-shot plan | "
+        f"source={split_plan['source']} | seen_train={len(seen_emotions)} | holdout_eval={len(holdout_emotions)}"
+    )
+    print(f"Holdout emotions (excluded from training): {holdout_emotions}")
+
+    train_dataset = ArtDataset(
+        split="train",
+        val_ratio=val_split,
+        split_seed=split_seed,
+        allowed_emotions=seen_emotions,
+    )
+    val_dataset = ArtDataset(
+        split="val",
+        val_ratio=val_split,
+        split_seed=split_seed,
+        allowed_emotions=seen_emotions,
+    )
 
     if len(train_dataset) == 0:
         print("No valid training pairs found. Rebuilding pairs.json via preprocess()...")
         preprocess()
-        train_dataset = ArtDataset(split="train", val_ratio=val_split, split_seed=split_seed)
-        val_dataset = ArtDataset(split="val", val_ratio=val_split, split_seed=split_seed)
+        all_dataset = ArtDataset(split="all", val_ratio=val_split, split_seed=split_seed)
+        split_plan = compute_zero_shot_emotion_split(all_dataset.data)
+        seen_emotions = split_plan["seen_emotions"]
+        holdout_emotions = split_plan["holdout_emotions"]
+
+        train_dataset = ArtDataset(
+            split="train",
+            val_ratio=val_split,
+            split_seed=split_seed,
+            allowed_emotions=seen_emotions,
+        )
+        val_dataset = ArtDataset(
+            split="val",
+            val_ratio=val_split,
+            split_seed=split_seed,
+            allowed_emotions=seen_emotions,
+        )
 
     train_loader = _make_loader(train_dataset, shuffle=True, batch_size=Config.BATCH_SIZE)
     val_loader = _make_loader(

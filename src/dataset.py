@@ -4,6 +4,7 @@ from transformers import CLIPProcessor
 from pathlib import Path
 import random
 from collections import defaultdict
+from typing import Dict, List, Optional, Sequence, Set
 
 from utils.helpers import load_json
 from utils.config import Config
@@ -28,6 +29,97 @@ def normalize_emotion_text(text):
 
 def format_emotion_prompt(emotion):
     return f"{PROMPT_PREFIX}{str(emotion).strip().lower()}"
+
+
+def _normalize_emotion_list(items):
+    if not items:
+        return []
+
+    return sorted(
+        {
+            normalize_emotion_text(item)
+            for item in items
+            if str(item).strip()
+        }
+    )
+
+
+def _emotion_counts(records):
+    counts = defaultdict(int)
+    for record in records:
+        emotion = record.get("emotion")
+        if emotion:
+            counts[emotion] += 1
+    return dict(counts)
+
+
+def compute_zero_shot_emotion_split(records):
+    """
+    Build deterministic label-held-out split for strict zero-shot workflows.
+    Returns a dict with holdout/seen emotions and per-emotion frequencies.
+    """
+    normalized_records = []
+    for record in records:
+        emotion = normalize_emotion_text(record.get("emotion", record.get("text", "")))
+        if not emotion:
+            continue
+        normalized_records.append({**record, "emotion": emotion})
+
+    if not normalized_records:
+        raise RuntimeError("No emotion records found while building zero-shot split.")
+
+    counts = _emotion_counts(normalized_records)
+    all_emotions = sorted(counts.keys())
+
+    configured = _normalize_emotion_list(getattr(Config, "ZERO_SHOT_HOLDOUT_EMOTIONS", None))
+    if configured:
+        missing = sorted([e for e in configured if e not in counts])
+        holdout = [e for e in configured if e in counts]
+        if missing:
+            print(
+                "Warning: Ignoring configured ZERO_SHOT_HOLDOUT_EMOTIONS not present in data: "
+                f"{missing}"
+            )
+        if not holdout:
+            raise RuntimeError(
+                "ZERO_SHOT_HOLDOUT_EMOTIONS is configured, but none of those emotions exist in data."
+            )
+        source = "config"
+    else:
+        ratio = float(getattr(Config, "ZERO_SHOT_HOLDOUT_RATIO", 0.2))
+        ratio = max(0.05, min(0.8, ratio))
+        min_count = int(getattr(Config, "ZERO_SHOT_HOLDOUT_MIN_COUNT", 1))
+        min_holdout = int(getattr(Config, "ZERO_SHOT_MIN_HOLDOUT_EMOTIONS", 1))
+
+        eligible = [e for e in all_emotions if counts.get(e, 0) >= min_count]
+        if not eligible:
+            eligible = all_emotions
+
+        target = max(min_holdout, int(round(len(eligible) * ratio)))
+        target = max(1, min(target, max(len(eligible) - 1, 1)))
+
+        seed = int(getattr(Config, "ZERO_SHOT_SPLIT_SEED", getattr(Config, "SPLIT_SEED", 42)))
+        rng = random.Random(seed)
+        eligible = sorted(eligible)
+        rng.shuffle(eligible)
+        holdout = sorted(eligible[:target])
+        source = "auto"
+
+    holdout_set = set(holdout)
+    seen = sorted([e for e in all_emotions if e not in holdout_set])
+
+    if not seen:
+        raise RuntimeError(
+            "Strict zero-shot split invalid: all emotions were assigned to holdout and none left for training."
+        )
+
+    return {
+        "source": source,
+        "holdout_emotions": holdout,
+        "seen_emotions": seen,
+        "all_emotions": all_emotions,
+        "emotion_counts": counts,
+    }
 
 
 def resolve_image_path(raw_path):
@@ -74,12 +166,26 @@ def resolve_image_path(raw_path):
 
 
 class ArtDataset(Dataset):
-    def __init__(self, split="train", val_ratio=0.2, split_seed=42):
+    def __init__(
+        self,
+        split="train",
+        val_ratio=0.2,
+        split_seed=42,
+        allowed_emotions: Optional[Sequence[str]] = None,
+        excluded_emotions: Optional[Sequence[str]] = None,
+    ):
         if split not in {"train", "val", "all"}:
             raise ValueError("split must be one of: train, val, all")
 
         all_data = load_json(_to_abs(Config.DATA_FILE))
         grouped = defaultdict(list)
+        allowed_set: Optional[Set[str]] = None
+        excluded_set: Set[str] = set()
+
+        if allowed_emotions is not None:
+            allowed_set = set(_normalize_emotion_list(allowed_emotions))
+        if excluded_emotions is not None:
+            excluded_set = set(_normalize_emotion_list(excluded_emotions))
 
         path_cache = {}
 
@@ -102,6 +208,12 @@ class ArtDataset(Dataset):
                 continue
 
             emotion = normalize_emotion_text(text)
+
+            if allowed_set is not None and emotion not in allowed_set:
+                continue
+            if excluded_set and emotion in excluded_set:
+                continue
+
             grouped[image_key].append(
                 {
                     "image": image_key,
@@ -147,14 +259,15 @@ class ArtDataset(Dataset):
     def __len__(self):
         return len(self.data)
 
-    def sample_negative_emotion(self, image_key, current_emotion=None, rng=None):
+    def sample_negative_emotion(self, image_key, current_emotion=None, rng=None, candidate_pool=None):
         rng = rng or random
 
         positives = self.image_to_emotions.get(image_key, set())
-        candidates = [e for e in self.emotions if e not in positives]
+        pool = self.emotions if candidate_pool is None else list(candidate_pool)
+        candidates = [e for e in pool if e not in positives]
 
         if not candidates and current_emotion is not None:
-            candidates = [e for e in self.emotions if e != current_emotion]
+            candidates = [e for e in pool if e != current_emotion]
 
         if not candidates:
             return None

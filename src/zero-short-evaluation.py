@@ -15,7 +15,7 @@ from src.dataset import (
     processor,
     format_emotion_prompt,
     resolve_image_path,
-    normalize_emotion_text,
+    compute_zero_shot_emotion_split,
 )
 from src.model import CLIPFineTuner
 from utils.config import Config
@@ -114,79 +114,11 @@ def _auroc(scores, labels):
     return auc
 
 
-def _resolve_zero_shot_holdout_emotions(train_dataset, all_dataset):
-    configured_holdout = getattr(Config, "ZERO_SHOT_HOLDOUT_EMOTIONS", None)
-
-    if configured_holdout:
-        holdout = {
-            normalize_emotion_text(item)
-            for item in configured_holdout
-            if str(item).strip()
-        }
-        available = set(all_dataset.emotions)
-        missing = sorted([e for e in holdout if e not in available])
-        holdout = sorted([e for e in holdout if e in available])
-
-        if missing:
-            print(
-                "Warning: Ignoring configured ZERO_SHOT_HOLDOUT_EMOTIONS not present in data: "
-                f"{missing}"
-            )
-
-        if not holdout:
-            raise RuntimeError(
-                "ZERO_SHOT_HOLDOUT_EMOTIONS is configured, but none of those emotions are present in pairs.json."
-            )
-
-        return holdout, "config"
-
-    train_emotions = set(train_dataset.emotions)
-    all_emotions = set(all_dataset.emotions)
-    holdout = sorted(all_emotions - train_emotions)
-
-    if not holdout:
-        fallback_count = int(getattr(Config, "ZERO_SHOT_FALLBACK_HOLDOUT_COUNT", 3) or 0)
-
-        if fallback_count <= 0:
-            raise RuntimeError(
-                "No unseen emotions found for strict zero-shot evaluation. "
-                "Set Config.ZERO_SHOT_HOLDOUT_EMOTIONS to explicit labels, "
-                "or set Config.ZERO_SHOT_FALLBACK_HOLDOUT_COUNT > 0 to enable deterministic fallback holdout."
-            )
-
-        # Deterministic fallback when strict unseen labels do not exist in the current split.
-        # We pick the least frequent emotions to keep a stable, challenging holdout.
-        freq = defaultdict(int)
-        for record in all_dataset.data:
-            emotion = record.get("emotion")
-            if emotion:
-                freq[emotion] += 1
-
-        ranked = sorted(freq.items(), key=lambda kv: (kv[1], kv[0]))
-        selected = [emotion for emotion, _ in ranked[: min(fallback_count, len(ranked))]]
-
-        if not selected:
-            raise RuntimeError(
-                "No emotions available in dataset to construct a fallback holdout set."
-            )
-
-        print(
-            "Warning: No unseen emotions found for strict zero-shot evaluation. "
-            "Falling back to deterministic holdout from available emotions: "
-            f"{selected}"
-        )
-
-        return selected, "fallback_seen_holdout"
-
-    return holdout, "derived"
-
-
 def _build_zero_shot_eval_dataset(split_seed, val_split):
-    train_dataset = ArtDataset(split="train", val_ratio=val_split, split_seed=split_seed)
     all_dataset = ArtDataset(split="all", val_ratio=val_split, split_seed=split_seed)
-    all_emotions = sorted(all_dataset.emotions)
-
-    holdout_emotions, source = _resolve_zero_shot_holdout_emotions(train_dataset, all_dataset)
+    split_plan = compute_zero_shot_emotion_split(all_dataset.data)
+    holdout_emotions = split_plan["holdout_emotions"]
+    source = split_plan["source"]
     holdout_set = set(holdout_emotions)
 
     filtered_records = [record for record in all_dataset.data if record.get("emotion") in holdout_set]
@@ -211,8 +143,8 @@ def _build_zero_shot_eval_dataset(split_seed, val_split):
     return {
         "dataset": all_dataset,
         "candidate_emotions": holdout_emotions,
-        "train_emotions": train_dataset.emotions,
-        "all_emotions": all_emotions,
+        "train_emotions": split_plan["seen_emotions"],
+        "all_emotions": split_plan["all_emotions"],
         "holdout_source": source,
     }
 
