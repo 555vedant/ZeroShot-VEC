@@ -3,6 +3,8 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import re
 import random
+import json
+import hashlib
 
 import sys
 from pathlib import Path
@@ -127,6 +129,7 @@ def _save_epoch_checkpoint(ckpt_dir, epoch, model, optimizer, scaler):
             "optimizer_state_dict": optimizer.state_dict(),
             "scaler_state_dict": scaler.state_dict(),
             "best_loss": getattr(model, "_best_loss", float("inf")),
+            "split_signature": getattr(model, "_split_signature", None),
         },
         checkpoint_path,
     )
@@ -135,7 +138,7 @@ def _save_epoch_checkpoint(ckpt_dir, epoch, model, optimizer, scaler):
     _cleanup_old_checkpoints(ckpt_dir)
 
 
-def _try_resume_training(model, optimizer, scaler, device):
+def _try_resume_training(model, optimizer, scaler, device, expected_split_signature=None):
     ckpt_dir = _checkpoint_dir()
     latest = _latest_epoch_checkpoint(ckpt_dir)
 
@@ -144,6 +147,11 @@ def _try_resume_training(model, optimizer, scaler, device):
         return 0, float("inf")
 
     state = torch.load(latest, map_location=device)
+
+    ckpt_signature = state.get("split_signature")
+    if expected_split_signature is not None and ckpt_signature != expected_split_signature:
+        print("Checkpoint split signature mismatch. Starting from epoch 1 for strict zero-shot consistency.")
+        return 0, float("inf")
 
     _safe_load_model_state(model, state["model_state_dict"])
     optimizer.load_state_dict(state["optimizer_state_dict"])
@@ -160,6 +168,17 @@ def _try_resume_training(model, optimizer, scaler, device):
     print(f"Starting from epoch {start_epoch + 1}")
 
     return start_epoch, best_loss
+
+
+def _compute_split_signature(split_plan):
+    payload = {
+        "seen_emotions": sorted(split_plan.get("seen_emotions", [])),
+        "holdout_emotions": sorted(split_plan.get("holdout_emotions", [])),
+        "source": split_plan.get("source", "unknown"),
+        "seed": int(getattr(Config, "ZERO_SHOT_SPLIT_SEED", getattr(Config, "SPLIT_SEED", 42))),
+    }
+    serialized = json.dumps(payload, sort_keys=True, ensure_ascii=True)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 # LOSS
@@ -287,6 +306,7 @@ def train():
     split_plan = compute_zero_shot_emotion_split(all_dataset.data)
     seen_emotions = split_plan["seen_emotions"]
     holdout_emotions = split_plan["holdout_emotions"]
+    split_signature = _compute_split_signature(split_plan)
 
     print(
         "Strict zero-shot plan | "
@@ -314,6 +334,7 @@ def train():
         split_plan = compute_zero_shot_emotion_split(all_dataset.data)
         seen_emotions = split_plan["seen_emotions"]
         holdout_emotions = split_plan["holdout_emotions"]
+        split_signature = _compute_split_signature(split_plan)
 
         train_dataset = ArtDataset(
             split="train",
@@ -362,7 +383,14 @@ def train():
 
     model.train()
 
-    start_epoch, best_loss = _try_resume_training(model, optimizer, scaler, device)
+    model._split_signature = split_signature
+    start_epoch, best_loss = _try_resume_training(
+        model,
+        optimizer,
+        scaler,
+        device,
+        expected_split_signature=split_signature,
+    )
 
     if start_epoch >= Config.EPOCHS:
         print("Training already completed.")
