@@ -141,25 +141,44 @@ class CLIPFineTuner(nn.Module):
 
             if balanced:
                 # Fast path: true DataParallel execution across GPUs.
-                outputs = self.model(
-                    pixel_values=pixel_values,
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                )
-                image_embeds = F.normalize(self._to_embedding_tensor(outputs, modality="image"), dim=-1)
-                text_embeds = F.normalize(self._to_embedding_tensor(outputs, modality="text"), dim=-1)
+                # If any runtime issue appears, fall back to the safe single-device feature APIs.
+                try:
+                    outputs = self.model(
+                        pixel_values=pixel_values,
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                    )
+                    image_embeds = F.normalize(self._to_embedding_tensor(outputs, modality="image"), dim=-1)
+                    text_embeds = F.normalize(self._to_embedding_tensor(outputs, modality="text"), dim=-1)
+                except RuntimeError:
+                    core = self.core_model()
+                    image_feats = core.get_image_features(pixel_values=pixel_values)
+                    text_feats = core.get_text_features(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                    )
+                    image_embeds = F.normalize(
+                        self._to_embedding_tensor(image_feats, modality="image"),
+                        dim=-1,
+                    )
+                    text_embeds = F.normalize(
+                        self._to_embedding_tensor(text_feats, modality="text"),
+                        dim=-1,
+                    )
             else:
                 # Safe path for uneven final batches that can trigger DP gather shape mismatches.
                 core = self.core_model()
+                image_feats = core.get_image_features(pixel_values=pixel_values)
+                text_feats = core.get_text_features(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                )
                 image_embeds = F.normalize(
-                    core.get_image_features(pixel_values=pixel_values),
+                    self._to_embedding_tensor(image_feats, modality="image"),
                     dim=-1,
                 )
                 text_embeds = F.normalize(
-                    core.get_text_features(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                    ),
+                    self._to_embedding_tensor(text_feats, modality="text"),
                     dim=-1,
                 )
         else:
