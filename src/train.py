@@ -351,7 +351,12 @@ def train():
         )
 
     gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
-    train_drop_last = bool(getattr(Config, "DROP_LAST_MULTI_GPU_TRAIN", True)) and device == "cuda" and gpu_count > 1
+    train_drop_last = (
+        bool(getattr(Config, "DROP_LAST_MULTI_GPU_TRAIN", True))
+        and device == "cuda"
+        and gpu_count > 1
+        and len(train_dataset) >= int(Config.BATCH_SIZE)
+    )
 
     train_loader = _make_loader(
         train_dataset,
