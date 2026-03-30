@@ -70,9 +70,7 @@ def _safe_load_model_state(model, state_dict):
     model.load_checkpoint_state_dict(state_dict)
 
 
-# ---------------------------
 # PATH HELPERS
-# ---------------------------
 def _to_abs(path_value):
     path = Path(path_value)
     return path if path.is_absolute() else (PROJECT_ROOT / path).resolve()
@@ -82,9 +80,7 @@ def _checkpoint_dir() -> Path:
     return _to_abs(Config.CHECKPOINT_FILE).parent / "epoch_checkpoints"
 
 
-# ---------------------------
 # CHECKPOINT UTILS
-# ---------------------------
 def _extract_epoch(path: Path):
     match = re.search(r"epoch_(\d+)\.pth$", path.name)
     return int(match.group(1)) if match else None
@@ -160,9 +156,7 @@ def _try_resume_training(model, optimizer, scaler, device):
     return start_epoch, best_loss
 
 
-# ---------------------------
 # LOSS
-# ---------------------------
 def matching_bce_loss(pos_logits, neg_logits):
     pos_targets = torch.ones_like(pos_logits)
     neg_targets = torch.zeros_like(neg_logits)
@@ -275,9 +269,7 @@ def _run_epoch(model, loader, optimizer, scaler, use_amp, device, dataset, rng, 
     return avg_loss, steps, skipped
 
 
-# ---------------------------
 # TRAIN
-# ---------------------------
 def train():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     _setup_cuda_backend()
@@ -339,9 +331,7 @@ def train():
 
     print(f"Train pairs: {len(train_dataset)} | Val pairs: {len(val_dataset)}")
 
-    # ---------------------------
     # TRAIN LOOP
-    # ---------------------------
     for epoch in range(start_epoch, Config.EPOCHS):
         print(f"\nEpoch {epoch + 1}/{Config.EPOCHS}")
 

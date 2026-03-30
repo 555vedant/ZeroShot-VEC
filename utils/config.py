@@ -29,15 +29,11 @@ def resolve_local_wikiart_path() -> Path:
 
 class Config:
 
-    # ---------------------------
     # ENV DETECTION
-    # ---------------------------
     IS_KAGGLE = is_kaggle()
     IS_COLAB = is_colab()
 
-    # ---------------------------
     # PATHS
-    # ---------------------------
     if IS_KAGGLE:
         BASE_PATH = Path("/kaggle/input/wikiart")
         ARTEMIS_PATH = Path("/kaggle/input/artemis-dataset")
@@ -56,16 +52,12 @@ class Config:
     DATA_FILE = WORK_DIR / "processed/pairs.json"
     CHECKPOINT_FILE = WORK_DIR / "checkpoints/clip_model.pth"
 
-    # ---------------------------
     # MODEL
-    # ---------------------------
     MODEL_NAME = "openai/clip-vit-base-patch32"
     IMAGE_SIZE = 224
     TEXT_MAX_LENGTH = 77
 
-    # ---------------------------
     # TRAINING
-    # ---------------------------
     BATCH_SIZE = 32
     EPOCHS = 3
     LR = 5e-6
@@ -82,9 +74,7 @@ class Config:
 
     MIXED_PRECISION = True
 
-    # ---------------------------
     # PERFORMANCE
-    # ---------------------------
     MULTI_GPU = True
     TF32 = True
 
@@ -98,7 +88,9 @@ class Config:
     EVAL_BATCH_SIZE = max(BATCH_SIZE, 64)
     INDEX_BATCH_SIZE = 128
 
-    # ---------------------------
     # SEARCH
-    # ---------------------------
     SEARCH_TOP_K = 5
+
+    # ZERO-SHOT EVALUATION
+    # If set, evaluate.py uses these emotions as holdout labels.
+    ZERO_SHOT_HOLDOUT_EMOTIONS = None
