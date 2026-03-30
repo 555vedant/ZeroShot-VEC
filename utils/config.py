@@ -59,7 +59,7 @@ class Config:
 
     # TRAINING
     BATCH_SIZE = 32
-    EPOCHS = 3
+    EPOCHS = 5
     LR = 5e-6
     DEVICE = "cuda"
     VAL_SPLIT = 0.2
