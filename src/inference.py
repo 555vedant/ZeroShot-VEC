@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+import gc
 from PIL import Image
 from pathlib import Path
 from transformers import CLIPProcessor
@@ -52,7 +53,20 @@ class SearchEngine:
                 "No valid images found for search index. Check data/processed/pairs.json image paths."
             )
 
-        self.image_embs = self._build_index()
+        self.image_emb_chunks = self._build_index()
+
+    @staticmethod
+    def _merge_topk(best_scores, best_indices, cand_scores, cand_indices, k):
+        if best_scores is None or best_indices is None:
+            take = min(k, cand_scores.numel())
+            vals, pos = torch.topk(cand_scores, k=take)
+            return vals, cand_indices[pos]
+
+        merged_scores = torch.cat([best_scores, cand_scores], dim=0)
+        merged_indices = torch.cat([best_indices, cand_indices], dim=0)
+        take = min(k, merged_scores.numel())
+        vals, pos = torch.topk(merged_scores, k=take)
+        return vals, merged_indices[pos]
 
     @staticmethod
     def _build_unique_image_records(raw_data):
@@ -70,7 +84,7 @@ class SearchEngine:
         return list(unique.values())
 
     def _build_index(self):
-        embs = []
+        emb_chunks = []
         kept = []
 
         num_workers = int(getattr(Config, "NUM_WORKERS", 2))
@@ -102,17 +116,22 @@ class SearchEngine:
                 inputs = {k: v.to(self.device, non_blocking=non_blocking) for k, v in inputs.items()}
 
                 out = self.model.encode_images(pixel_values=inputs["pixel_values"])
-                embs.append(out)
+                out_cpu = out.detach().to("cpu", dtype=torch.float16)
+                emb_chunks.append(out_cpu)
                 kept.extend({"image": path} for path in paths)
 
-        if len(embs) == 0:
+                del images, paths, inputs, out, out_cpu
+                if self.device == "cuda":
+                    torch.cuda.empty_cache()
+
+        if len(emb_chunks) == 0:
             raise RuntimeError(
                 "Failed to create image index. All images failed to load."
             )
 
         self.data = kept
-        embs = torch.cat(embs)
-        return F.normalize(embs, dim=-1)
+        gc.collect()
+        return emb_chunks
 
     def search(self, query, top_k=Config.SEARCH_TOP_K):
         inputs = self.processor(text=[query], return_tensors="pt")
@@ -125,11 +144,34 @@ class SearchEngine:
                 attention_mask=inputs["attention_mask"],
             )
 
-        text_emb = F.normalize(text_emb, dim=-1)
+        text_emb = F.normalize(text_emb, dim=-1).squeeze(0).detach().to("cpu", dtype=torch.float32)
+        k = min(int(top_k), len(self.data))
 
-        sims = (text_emb @ self.image_embs.T).squeeze(0)
-        k = min(top_k, len(self.data))
-        idx = sims.topk(k).indices.tolist()
+        best_scores = None
+        best_indices = None
+        offset = 0
+
+        for chunk in self.image_emb_chunks:
+            chunk_fp32 = chunk.to(dtype=torch.float32)
+            sims_chunk = torch.mv(chunk_fp32, text_emb)
+            idx_chunk = torch.arange(
+                offset,
+                offset + sims_chunk.numel(),
+                dtype=torch.long,
+            )
+            best_scores, best_indices = self._merge_topk(
+                best_scores,
+                best_indices,
+                sims_chunk,
+                idx_chunk,
+                k,
+            )
+            offset += sims_chunk.numel()
+
+        if best_indices is None:
+            return []
+
+        idx = best_indices.tolist()
 
         results = [self.data[i]["image"] for i in idx]
         return results
