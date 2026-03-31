@@ -19,6 +19,54 @@ class CLIPFineTuner(nn.Module):
             for p in self.model.text_model.parameters():
                 p.requires_grad = False
 
+        self._apply_partial_unfreeze()
+
+    @staticmethod
+    def _set_requires_grad(module, flag):
+        for p in module.parameters():
+            p.requires_grad = bool(flag)
+
+    @staticmethod
+    def _unfreeze_top_encoder_layers(encoder_module, top_k):
+        layers = getattr(encoder_module, "layers", None)
+        if layers is None:
+            return 0
+
+        n = len(layers)
+        if n == 0:
+            return 0
+
+        k = max(0, min(int(top_k), n))
+        if k == 0:
+            return 0
+
+        for layer in layers[n - k:]:
+            for p in layer.parameters():
+                p.requires_grad = True
+        return k
+
+    def _apply_partial_unfreeze(self):
+        core = self.model
+
+        if bool(getattr(Config, "FREEZE_VISION", True)):
+            k_vis = int(getattr(Config, "UNFREEZE_VISION_TOP_LAYERS", 0))
+            self._unfreeze_top_encoder_layers(core.vision_model.encoder, k_vis)
+
+            if bool(getattr(Config, "UNFREEZE_VISION_POST_LAYERNORM", True)):
+                self._set_requires_grad(core.vision_model.post_layernorm, True)
+
+        if bool(getattr(Config, "FREEZE_TEXT", True)):
+            k_txt = int(getattr(Config, "UNFREEZE_TEXT_TOP_LAYERS", 0))
+            self._unfreeze_top_encoder_layers(core.text_model.encoder, k_txt)
+
+            if bool(getattr(Config, "UNFREEZE_TEXT_FINAL_LAYERNORM", True)):
+                self._set_requires_grad(core.text_model.final_layer_norm, True)
+
+        # Keep projection heads and logit scale trainable for alignment tuning.
+        self._set_requires_grad(core.visual_projection, True)
+        self._set_requires_grad(core.text_projection, True)
+        core.logit_scale.requires_grad = True
+
     def enable_data_parallel(self):
         if isinstance(self.model, nn.DataParallel):
             return
