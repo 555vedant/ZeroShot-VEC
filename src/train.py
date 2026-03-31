@@ -79,6 +79,62 @@ def _safe_load_model_state(model, state_dict):
     model.load_checkpoint_state_dict(state_dict)
 
 
+def _build_optimizer(model):
+    base_lr = float(getattr(Config, "LR", 5e-6))
+    backbone_lr_mult = float(getattr(Config, "BACKBONE_LR_MULTIPLIER", 0.2))
+    weight_decay = float(getattr(Config, "WEIGHT_DECAY", 0.01))
+
+    backbone_params = []
+    head_params = []
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+
+        is_backbone = (
+            ".vision_model." in name
+            or ".text_model." in name
+            or name.startswith("model.vision_model.")
+            or name.startswith("model.text_model.")
+            or name.startswith("model.module.vision_model.")
+            or name.startswith("model.module.text_model.")
+        )
+
+        if is_backbone:
+            backbone_params.append(param)
+        else:
+            head_params.append(param)
+
+    param_groups = []
+    if backbone_params:
+        param_groups.append(
+            {
+                "params": backbone_params,
+                "lr": base_lr * backbone_lr_mult,
+                "weight_decay": weight_decay,
+            }
+        )
+    if head_params:
+        param_groups.append(
+            {
+                "params": head_params,
+                "lr": base_lr,
+                "weight_decay": weight_decay,
+            }
+        )
+
+    if not param_groups:
+        raise RuntimeError("No trainable parameters found for optimizer.")
+
+    print(
+        "Optimizer groups | "
+        f"backbone={len(backbone_params)} params @ {base_lr * backbone_lr_mult:.2e} | "
+        f"head={len(head_params)} params @ {base_lr:.2e}"
+    )
+
+    return torch.optim.AdamW(param_groups)
+
+
 # PATH HELPERS
 def _to_abs(path_value):
     path = Path(path_value)
@@ -386,10 +442,7 @@ def train():
     if trainable_params == 0:
         raise RuntimeError("No trainable parameters found.")
 
-    optimizer = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=Config.LR
-    )
+    optimizer = _build_optimizer(model)
 
     use_amp = Config.MIXED_PRECISION and device == "cuda"
     scaler = _make_grad_scaler(use_amp=use_amp)
