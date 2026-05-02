@@ -174,7 +174,10 @@ def _cleanup_old_checkpoints(ckpt_dir: Path, keep=3):
 
 
 def _save_latest_checkpoint(ckpt_dir, epoch, model, optimizer, scaler):
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    if ckpt_dir is not None:
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        Config.CHECKPOINT_FILE.parent.mkdir(parents=True, exist_ok=True)
     
     # Save precisely as clip_model.pth natively according to config
     checkpoint_path = Config.CHECKPOINT_FILE
@@ -191,7 +194,7 @@ def _try_resume_training(model, optimizer, scaler, device, expected_split_signat
     
     if not checkpoint_path.exists():
         print("No existing checkpoint found. Starting fresh.")
-        return 0, None
+        return 0, float("inf")
 
     print(f"Loading checkpoint from {checkpoint_path}...")
     try:
@@ -200,7 +203,7 @@ def _try_resume_training(model, optimizer, scaler, device, expected_split_signat
         try:
             model.load_checkpoint_state_dict(checkpoint)
             print("Successfully resumed Direct Model.")
-            return 0, None
+            return 0, float("inf")
         except Exception:
             # Fallback backward compatibility from previous epoch format if needed
             model.load_checkpoint_state_dict(checkpoint.get("model_state_dict", checkpoint))
@@ -217,35 +220,7 @@ def _try_resume_training(model, optimizer, scaler, device, expected_split_signat
         return start_epoch, best_loss
     except Exception as e:
         print(f"Failed to load checkpoint: {e}. Starting fresh.")
-        return 0, None
-
-    if latest is None:
-        print("No checkpoint found. Starting from epoch 1.")
         return 0, float("inf")
-
-    state = torch.load(latest, map_location=device)
-
-    ckpt_signature = state.get("split_signature")
-    if expected_split_signature is not None and ckpt_signature != expected_split_signature:
-        print("Checkpoint split signature mismatch. Starting from epoch 1 for strict zero-shot consistency.")
-        return 0, float("inf")
-
-    _safe_load_model_state(model, state["model_state_dict"])
-    optimizer.load_state_dict(state["optimizer_state_dict"])
-
-    if "scaler_state_dict" in state:
-        scaler.load_state_dict(state["scaler_state_dict"])
-
-    completed_epoch = int(state.get("epoch", 0))
-    start_epoch = completed_epoch
-    best_loss = float(state.get("best_loss", float("inf")))
-    model._best_loss = best_loss
-
-    print(f"Resumed from {latest}")
-    print(f"Starting from epoch {start_epoch + 1}")
-
-    return start_epoch, best_loss
-
 
 def _compute_split_signature(split_plan):
     payload = {
