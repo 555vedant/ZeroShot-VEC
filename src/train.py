@@ -244,7 +244,7 @@ def matching_bce_loss(pos_logits, neg_logits):
     neg_targets = torch.zeros_like(neg_logits)
 
     pos_loss = F.binary_cross_entropy_with_logits(pos_logits, pos_targets)
-    neg_loss = F.binary_cross_entropy_with_logits(neg_logits, neg_targets)
+    neg_loss = F.binary_cross_entropy_with_logits(neg_logits, neg_targets)  
     return 0.5 * (pos_loss + neg_loss)
 
 
