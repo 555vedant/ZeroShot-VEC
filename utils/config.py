@@ -49,8 +49,8 @@ class Config:
         ARTEMIS_PATH = Path("./data/artemis")
         WORK_DIR = Path("./data")
 
-    DATA_FILE = WORK_DIR / "processed/pairs.json"
-    CHECKPOINT_FILE = WORK_DIR / "checkpoints/clip_model.pth"
+    DATA_FILE = WORK_DIR / "pairs.json"
+    CHECKPOINT_FILE = WORK_DIR / "clip_model.pth"
 
     # MODEL
     MODEL_NAME = "openai/clip-vit-base-patch32"
@@ -59,7 +59,7 @@ class Config:
 
     # TRAINING
     BATCH_SIZE = 32
-    EPOCHS = 1
+    EPOCHS = 7
     LR = 5e-6
     DEVICE = "cuda"
     VAL_SPLIT = 0.2
