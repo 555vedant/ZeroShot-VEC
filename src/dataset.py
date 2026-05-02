@@ -225,6 +225,13 @@ class ArtDataset(Dataset):
                 }
             )
 
+        if not grouped:
+            raise RuntimeError(
+                "No valid image paths could be resolved from pairs.json. "
+                "Check Config.BASE_PATH or set the WIKIART_PATH environment variable "
+                "to your local WikiArt root."
+            )
+
         image_keys = sorted(grouped.keys())
         rng = random.Random(split_seed)
         rng.shuffle(image_keys)

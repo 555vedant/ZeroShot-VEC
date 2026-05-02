@@ -1,6 +1,9 @@
 import os
 from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+WEBAPP_DIR = PROJECT_ROOT / "webapp"
+
 
 def is_kaggle():
     return os.path.exists("/kaggle/input")
@@ -19,7 +22,13 @@ def is_colab():
 
 
 def resolve_local_wikiart_path() -> Path:
-    """Prefer existing local WikiArt directory regardless of case."""
+    """Prefer an env override, else existing local WikiArt directory regardless of case."""
+    override = os.environ.get("WIKIART_PATH")
+    if override:
+        override_path = Path(override).expanduser()
+        if override_path.exists():
+            return override_path
+
     candidates = [Path("./data/Wikiart"), Path("./data/wikiart")]
     for candidate in candidates:
         if candidate.exists():
@@ -49,8 +58,17 @@ class Config:
         ARTEMIS_PATH = Path("./data/artemis")
         WORK_DIR = Path("./data")
 
-    DATA_FILE = WORK_DIR / "pairs.json"
-    CHECKPOINT_FILE = WORK_DIR / "clip_model.pth"
+    @staticmethod
+    def _prefer_webapp(default_path: Path, webapp_name: str) -> Path:
+        webapp_path = WEBAPP_DIR / webapp_name
+        if default_path.exists():
+            return default_path
+        if webapp_path.exists():
+            return webapp_path
+        return default_path
+
+    DATA_FILE = _prefer_webapp(WORK_DIR / "pairs.json", "pairs.json")
+    CHECKPOINT_FILE = _prefer_webapp(WORK_DIR / "clip_model.pth", "clip_model.pth")
 
     # MODEL
     MODEL_NAME = "openai/clip-vit-base-patch32"

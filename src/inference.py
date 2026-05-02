@@ -20,18 +20,22 @@ def _to_abs(path_value):
 
 
 class SearchEngine:
-    def __init__(self):
+    def __init__(self, checkpoint_path=None, data_path=None):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        # Defaults fallback to config if not provided
+        cp_path = checkpoint_path if checkpoint_path else _to_abs(Config.CHECKPOINT_FILE)
+        dp_path = data_path if data_path else _to_abs(Config.DATA_FILE)
 
         # 🔹 Load model
         self.model = CLIPFineTuner().to(self.device)
-        state = torch.load(_to_abs(Config.CHECKPOINT_FILE), map_location=self.device)
+        state = torch.load(cp_path, map_location=self.device)
         self.model.load_checkpoint_state_dict(state)
         self.model.eval()
 
         self.processor = CLIPProcessor.from_pretrained(Config.MODEL_NAME, use_fast=False)
 
-        raw_data = load_json(_to_abs(Config.DATA_FILE))
+        raw_data = load_json(dp_path)
         self.data = self._build_unique_image_records(raw_data)
 
         # 🔥 Build index (fast)
@@ -65,6 +69,9 @@ class SearchEngine:
 
         with torch.no_grad():
             for images, paths in loader:
+                if not images:
+                    continue
+                
                 inputs = self.processor(images=images, return_tensors="pt").to(self.device)
 
                 emb = self.model.encode_images(pixel_values=inputs["pixel_values"])
@@ -74,6 +81,10 @@ class SearchEngine:
 
                 # free memory
                 del images, inputs, emb
+
+        if not all_embeddings:
+            raise ValueError(f"No valid images were loaded from the dataset path '{Config.DATA_FILE}'. "
+                             "Please ensure your pairs.json contains valid image paths.")
 
         #  Single tensor ( IMPORTANT)
         return torch.cat(all_embeddings, dim=0)

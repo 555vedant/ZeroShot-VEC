@@ -52,23 +52,27 @@
         <div class="result">
             <h3>Results</h3>
             <p><strong>Prompt:</strong> {{ prompt }}</p>
-            <p><strong>Similarity Score for Uploaded Image:</strong> {{ score }}</p>
+            {% if model_prompt %}
+            <p style="margin-top: -10px; color: #666;"><small>Model Prompt: {{ model_prompt }}</small></p>
+            {% endif %}
+            <p><strong>Match Probability:</strong> <span style="font-size: 1.2em; font-weight: bold; color: #28a745;">{{ score }}</span></p>
+            <p style="margin-top: -10px; color: #666;"><small>Raw Cosine Similarity: {{ raw_cosine }}</small></p>
             
             <div class="image-preview">
                 <strong>Uploaded Image:</strong><br><br>
                 <img src="{{ url_for('uploaded_file', filename=image_path) }}" alt="Uploaded Image">
             </div>
 
-            {% if top_matches %}
-            <hr style="border: 0; height: 1px; background: #cce4fc; margin: 20px 0;">
-            <h4>Top 5 Matches from Dataset</h4>
-            <div class="gallery">
-                {% for match in top_matches %}
-                <div class="gallery-item">
-                    <img src="{{ url_for('dataset_images', filepath=match) }}" alt="Dataset Image {{ loop.index }}">
-                    <span>#{{ loop.index }}</span>
+            {% if top_matches and top_matches|length > 0 %}
+            <div style="margin-top: 20px;">
+                <strong>Top Matching Dataset Images:</strong>
+                <div class="gallery">
+                    {% for path in top_matches %}
+                    <div class="gallery-item">
+                        <img src="{{ url_for('dataset_image', path=path) }}" alt="Match">
+                    </div>
+                    {% endfor %}
                 </div>
-                {% endfor %}
             </div>
             {% endif %}
         </div>
