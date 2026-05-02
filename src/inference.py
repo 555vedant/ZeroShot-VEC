@@ -75,7 +75,7 @@ class SearchEngine:
                 # free memory
                 del images, inputs, emb
 
-        # 🔥 Single tensor (VERY IMPORTANT)
+        #  Single tensor ( IMPORTANT)
         return torch.cat(all_embeddings, dim=0)
 
     def search(self, query, top_k=5):
