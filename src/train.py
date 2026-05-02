@@ -173,31 +173,51 @@ def _cleanup_old_checkpoints(ckpt_dir: Path, keep=3):
             print(f"Deleted old checkpoint: {f}")
 
 
-def _save_epoch_checkpoint(ckpt_dir, epoch, model, optimizer, scaler):
+def _save_latest_checkpoint(ckpt_dir, epoch, model, optimizer, scaler):
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-
-    epoch_number = epoch + 1
-    checkpoint_path = ckpt_dir / f"epoch_{epoch_number}.pth"
-
+    
+    # Save precisely as clip_model.pth natively according to config
+    checkpoint_path = Config.CHECKPOINT_FILE
+    
     torch.save(
-        {
-            "epoch": epoch_number,
-            "model_state_dict": model.checkpoint_state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scaler_state_dict": scaler.state_dict(),
-            "best_loss": getattr(model, "_best_loss", float("inf")),
-            "split_signature": getattr(model, "_split_signature", None),
-        },
+        model.checkpoint_state_dict(),
         checkpoint_path,
     )
-
-    print(f"Saved checkpoint: {checkpoint_path}")
-    _cleanup_old_checkpoints(ckpt_dir)
+    print(f"Saved latest model directly to: {checkpoint_path}")
 
 
 def _try_resume_training(model, optimizer, scaler, device, expected_split_signature=None):
-    ckpt_dir = _checkpoint_dir()
-    latest = _latest_epoch_checkpoint(ckpt_dir)
+    checkpoint_path = Config.CHECKPOINT_FILE
+    
+    if not checkpoint_path.exists():
+        print("No existing checkpoint found. Starting fresh.")
+        return 0, None
+
+    print(f"Loading checkpoint from {checkpoint_path}...")
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        # Attempt direct state dict load if we're saving direct dicts
+        try:
+            model.load_checkpoint_state_dict(checkpoint)
+            print("Successfully resumed Direct Model.")
+            return 0, None
+        except Exception:
+            # Fallback backward compatibility from previous epoch format if needed
+            model.load_checkpoint_state_dict(checkpoint.get("model_state_dict", checkpoint))
+            
+            if "optimizer_state_dict" in checkpoint:
+                optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            if "scaler_state_dict" in checkpoint and scaler is not None:
+                scaler.load_state_dict(checkpoint["scaler_state_dict"])
+
+        start_epoch = checkpoint.get("epoch", 0)
+        best_loss = checkpoint.get("best_loss", float("inf"))
+        
+        print(f"Successfully resumed from epoch {start_epoch}")
+        return start_epoch, best_loss
+    except Exception as e:
+        print(f"Failed to load checkpoint: {e}. Starting fresh.")
+        return 0, None
 
     if latest is None:
         print("No checkpoint found. Starting from epoch 1.")
@@ -513,11 +533,11 @@ def train():
             best_path = _to_abs(Config.CHECKPOINT_FILE)
             best_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save(model.checkpoint_state_dict(), best_path)
-            print(f"Saved BEST model at epoch {epoch + 1}")
+            print(f"Saved BEST model at epoch {epoch + 1} to {best_path}")
 
-        # Save checkpoint after best-loss update so resume state is accurate.
+        # Save checkpoint directly as the exact best-loss model every epoch (or just only best)
         model._best_loss = best_loss
-        _save_epoch_checkpoint(_checkpoint_dir(), epoch, model, optimizer, scaler)
+        _save_latest_checkpoint(None, epoch, model, optimizer, scaler)
 
     print("Training complete.")
 
