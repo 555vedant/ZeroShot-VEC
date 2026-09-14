@@ -37,8 +37,7 @@ class SearchEngine:
 
         raw_data = load_json(dp_path)
         self.data = self._build_unique_image_records(raw_data)
-
-        # 🔥 Build index (fast)
+#build index fast
         self.image_embeddings = self._build_index()
 
     def _build_unique_image_records(self, raw_data):
@@ -100,7 +99,7 @@ class SearchEngine:
 
         text_emb = text_emb.cpu()
 
-        # 🔥 FAST vectorized similarity
+        # FAST vectorized similarity
         sims = torch.matmul(self.image_embeddings, text_emb.T).squeeze()
 
         top_k = min(top_k, len(sims))

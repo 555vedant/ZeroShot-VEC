@@ -11,8 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_ROOT))
 
 from src.model import CLIPFineTuner
-from src.dataset import format_emotion_prompt, normalize_emotion_text, resolve_image_path
-from src.inference import SearchEngine
+from src.dataset import format_emotion_prompt, resolve_image_path
 from transformers import CLIPProcessor
 from utils.config import Config
 
@@ -57,32 +56,35 @@ model.eval()
 processor = CLIPProcessor.from_pretrained(Config.MODEL_NAME, use_fast=False)
 print("Model and Processor loaded successfully!", flush=True)
 
-# Lazy search engine (dataset-backed image retrieval)
-_search_engine = None
-_search_engine_error = None
+EMOTION_LABELS = [
+    "joy",
+    "sadness",
+    "anger",
+    "fear",
+    "awe",
+    "serenity",
+    "loneliness",
+    "melancholy",
+]
+
+LOW_COSINE_THRESHOLD = 0.045
+MID_COSINE_THRESHOLD = 0.09
+HIGH_COSINE_THRESHOLD = 0.2
 
 
-def _get_search_engine():
-    global _search_engine, _search_engine_error
-    if _search_engine is not None or _search_engine_error is not None:
-        return _search_engine
+def _calibrate_probability(prob_percent, cosine_sim):
+    scale = 1.0
+    if cosine_sim < LOW_COSINE_THRESHOLD:
+        ratio = max(0.0, cosine_sim / LOW_COSINE_THRESHOLD)
+        scale = max(0.1, 0.4 * ratio)
+    elif cosine_sim < MID_COSINE_THRESHOLD:
+        ratio = (cosine_sim - LOW_COSINE_THRESHOLD) / (MID_COSINE_THRESHOLD - LOW_COSINE_THRESHOLD)
+        scale = 0.4 + 0.6 * max(0.0, min(1.0, ratio))
+    elif cosine_sim >= HIGH_COSINE_THRESHOLD:
+        scale = 1.05
 
-    try:
-        cp_path = None
-        if local_checkpoint.exists():
-            cp_path = local_checkpoint
-        elif config_checkpoint.exists():
-            cp_path = config_checkpoint
-
-        dp_path = Path(Config.DATA_FILE)
-        if not dp_path.exists():
-            raise FileNotFoundError(f"Missing pairs.json at {dp_path}")
-
-        _search_engine = SearchEngine(checkpoint_path=cp_path, data_path=dp_path)
-    except Exception as exc:
-        _search_engine_error = f"Search disabled: {exc}"
-
-    return _search_engine
+    calibrated = prob_percent * scale
+    return max(0.0, min(99.9, calibrated))
 
 @app.route('/uploads/<path:filename>')
 def uploaded_file(filename):
@@ -102,10 +104,9 @@ def dataset_image():
 @app.route('/', methods=['GET', 'POST'])
 def index():
     if request.method == 'POST':
-        raw_prompt = request.form.get('prompt', '').strip()
-        
-        if not raw_prompt:
-            return render_template('index.html', error='No prompt provided.')
+        selected_label = request.form.get('label', '').strip().lower()
+        if selected_label not in EMOTION_LABELS:
+            return render_template('index.html', error='Invalid label selected.', labels=EMOTION_LABELS)
 
         if 'image' not in request.files:
             return render_template('index.html', error='No image uploaded.')
@@ -126,15 +127,8 @@ def index():
                 return render_template('index.html', error=f"Invalid image: {str(e)}")
             
             error = None
-            similarity_score = 0.0
-            model_prompt = raw_prompt
-            top_matches = []
-            search_error = None
+            model_prompt = format_emotion_prompt(selected_label)
             try:
-                normalized = normalize_emotion_text(raw_prompt)
-                if normalized:
-                    model_prompt = format_emotion_prompt(normalized)
-
                 # Process inputs (match training prompt format)
                 inputs = processor(
                     text=[model_prompt],
@@ -161,29 +155,23 @@ def index():
                     )
                     cosine_sim = (image_embeds * text_embeds).sum(dim=-1).item()
 
-                # Top-K image search using dataset embeddings
-                engine = _get_search_engine()
-                if engine is None:
-                    search_error = _search_engine_error
-                else:
-                    top_matches = engine.search(model_prompt, top_k=Config.SEARCH_TOP_K)
-                
+                similarity_prob = _calibrate_probability(similarity_prob, cosine_sim)
+
             except Exception as e:
                 error = f"Error during inference: {str(e)}"
             
             return render_template(
                 'index.html', 
-                prompt=raw_prompt,
+                prompt=selected_label,
                 model_prompt=model_prompt,
                 image_path=filename, 
                 score=f"{similarity_prob:.2f}%",
-                raw_cosine=f"{cosine_sim:.4f}",
                 error=error,
-                top_matches=top_matches,
-                search_error=search_error
+                labels=EMOTION_LABELS,
+                selected_label=selected_label
             )
             
-    return render_template('index.html')
+    return render_template('index.html', labels=EMOTION_LABELS)
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
