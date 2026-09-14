@@ -1,6 +1,7 @@
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
+import copy  # CLIPFIT
 from collections import OrderedDict
 from transformers import CLIPModel
 from utils.config import Config
@@ -20,6 +21,29 @@ class CLIPFineTuner(nn.Module):
                 p.requires_grad = False
 
         self._apply_partial_unfreeze()
+        # CLIPFIT: Restrict adaptation to image-side LayerNorm parameters.
+        if getattr(Config, "FINE_TUNING_STRATEGY", "full") == "clipfit":
+            self._configure_clipfit_parameters()
+        elif getattr(Config, "FINE_TUNING_STRATEGY", "full") != "full":
+            raise ValueError("FINE_TUNING_STRATEGY must be 'full' or 'clipfit'.")
+
+    # CLIPFIT: The paper's image-side LayerNorm-only parameter-efficient setting.
+    def _configure_clipfit_parameters(self):
+        for parameter in self.model.parameters():
+            parameter.requires_grad = False
+
+        for module in self.model.vision_model.modules():
+            if isinstance(module, nn.LayerNorm):
+                for parameter in module.parameters():
+                    parameter.requires_grad = True
+
+    # CLIPFIT: Preserve the pretrained image representation as a frozen teacher.
+    def create_clipfit_teacher(self):
+        teacher = copy.deepcopy(self.model)
+        for parameter in teacher.parameters():
+            parameter.requires_grad = False
+        teacher.eval()
+        return teacher
 
     @staticmethod
     def _set_requires_grad(module, flag):

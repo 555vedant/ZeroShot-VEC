@@ -79,7 +79,11 @@ class Config:
 
     # TRAINING
     BATCH_SIZE = 32
-    EPOCHS = 7
+    EPOCHS = 1
+    # CLIPFIT: Select "full" for the existing baseline or "clipfit" for the experiment.
+    FINE_TUNING_STRATEGY = "clipfit"
+    # CLIPFIT: Weight for frozen-teacher image representation distillation.
+    CLIPFIT_KD_WEIGHT = 8.0
     LR = 5e-6
     DEVICE = "cuda"
     VAL_SPLIT = 0.2

@@ -243,6 +243,13 @@ def matching_bce_loss(pos_logits, neg_logits):
     return 0.5 * (pos_loss + neg_loss)
 
 
+# CLIPFIT: Knowledge distillation keeps the adapted image encoder close to frozen CLIP.
+def clipfit_kd_loss(student_embeds, teacher_embeds):
+    student_embeds = F.normalize(student_embeds, dim=-1)
+    teacher_embeds = F.normalize(teacher_embeds, dim=-1)
+    return 1.0 - (student_embeds * teacher_embeds).sum(dim=-1).mean()
+
+
 def _build_negative_text_inputs(dataset, image_keys, emotions, device, rng):
     negative_texts = []
 
@@ -270,8 +277,10 @@ def _build_negative_text_inputs(dataset, image_keys, emotions, device, rng):
     return {k: v.to(device, non_blocking=non_blocking) for k, v in neg_inputs.items()}
 
 
-def _run_epoch(model, loader, optimizer, scaler, use_amp, device, dataset, rng, train_mode):
+def _run_epoch(model, loader, optimizer, scaler, use_amp, device, dataset, rng, train_mode, teacher=None):
     total_loss = 0.0
+    total_bce_loss = 0.0
+    total_kd_loss = 0.0
     steps = 0
     skipped = 0
 
@@ -322,7 +331,18 @@ def _run_epoch(model, loader, optimizer, scaler, use_amp, device, dataset, rng, 
                     temperature=Config.TEMPERATURE,
                 )
 
-                loss = matching_bce_loss(pos_logits, neg_logits)
+                bce_loss = matching_bce_loss(pos_logits, neg_logits)
+                kd_loss = torch.zeros((), device=device)
+                if teacher is not None:
+                    student_image_embeds = model.encode_images(batch["pixel_values"])
+                    with torch.no_grad():
+                        teacher_image_embeds = teacher.get_image_features(
+                            pixel_values=batch["pixel_values"]
+                        )
+                        teacher_image_embeds = F.normalize(teacher_image_embeds, dim=-1)
+                    kd_loss = clipfit_kd_loss(student_image_embeds, teacher_image_embeds)
+
+                loss = bce_loss + float(getattr(Config, "CLIPFIT_KD_WEIGHT", 8.0)) * kd_loss
 
         if train_mode:
             if use_amp:
@@ -337,13 +357,24 @@ def _run_epoch(model, loader, optimizer, scaler, use_amp, device, dataset, rng, 
                 optimizer.step()
 
         total_loss += loss.item()
+        total_bce_loss += bce_loss.item()
+        total_kd_loss += kd_loss.item()
         steps += 1
 
         if train_mode and step % 50 == 0:
-            print(f"Step {step} | Loss {loss.item():.4f}")
+            print(
+                f"Step {step} | BCE {bce_loss.item():.4f} | "
+                f"KD {kd_loss.item():.4f} | Total {loss.item():.4f}"
+            )
 
     avg_loss = total_loss / max(steps, 1)
-    return avg_loss, steps, skipped
+    return (
+        avg_loss,
+        total_bce_loss / max(steps, 1),
+        total_kd_loss / max(steps, 1),
+        steps,
+        skipped,
+    )
 
 
 # TRAIN
@@ -429,13 +460,24 @@ def train():
 
     model = CLIPFineTuner().to(device)
 
+    # CLIPFIT: Create the teacher before any checkpoint can alter the student.
+    teacher = model.create_clipfit_teacher().to(device) if getattr(
+        Config, "FINE_TUNING_STRATEGY", "full"
+    ) == "clipfit" else None
+
     if device == "cuda" and getattr(Config, "MULTI_GPU", True) and gpu_count > 1:
         model.enable_data_parallel()
         print(f"Using DataParallel on {gpu_count} GPUs")
 
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
     if trainable_params == 0:
         raise RuntimeError("No trainable parameters found.")
+
+    print(
+        f"Parameters | total={total_params:,} | trainable={trainable_params:,} | "
+        f"trainable%={100.0 * trainable_params / max(total_params, 1):.4f}%"
+    )
 
     optimizer = _build_optimizer(model)
 
@@ -466,7 +508,7 @@ def train():
     for epoch in range(start_epoch, Config.EPOCHS):
         print(f"\nEpoch {epoch + 1}/{Config.EPOCHS}")
 
-        train_loss, train_steps, train_skipped = _run_epoch(
+        train_loss, train_bce, train_kd, train_steps, train_skipped = _run_epoch(
             model=model,
             loader=train_loader,
             optimizer=optimizer,
@@ -476,13 +518,14 @@ def train():
             dataset=train_dataset,
             rng=rng_train,
             train_mode=True,
+            teacher=teacher,
         )
 
         if train_steps == 0:
             raise RuntimeError("No valid training batches were produced.")
 
         if len(val_dataset) > 0:
-            val_loss, val_steps, val_skipped = _run_epoch(
+            val_loss, val_bce, val_kd, val_steps, val_skipped = _run_epoch(
                 model=model,
                 loader=val_loader,
                 optimizer=optimizer,
@@ -492,14 +535,17 @@ def train():
                 dataset=val_dataset,
                 rng=rng_val,
                 train_mode=False,
+                teacher=teacher,
             )
         else:
-            val_loss, val_steps, val_skipped = train_loss, 0, 0
+            val_loss, val_bce, val_kd, val_steps, val_skipped = train_loss, train_bce, train_kd, 0, 0
 
         print(
-            f"Epoch {epoch + 1} | Train Loss: {train_loss:.4f} "
+            f"Epoch {epoch + 1} | Train BCE: {train_bce:.4f} | "
+            f"Train KD: {train_kd:.4f} | Train Total: {train_loss:.4f} "
             f"(steps={train_steps}, skipped={train_skipped}) | "
-            f"Val Loss: {val_loss:.4f} (steps={val_steps}, skipped={val_skipped})"
+            f"Val BCE: {val_bce:.4f} | Val KD: {val_kd:.4f} | "
+            f"Val Total: {val_loss:.4f} (steps={val_steps}, skipped={val_skipped})"
         )
 
         # Save best model
