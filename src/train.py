@@ -250,6 +250,16 @@ def clipfit_kd_loss(student_embeds, teacher_embeds):
     return 1.0 - (student_embeds * teacher_embeds).sum(dim=-1).mean()
 
 
+# CLIPFIT: Convert any Hugging Face vision output into projected image embeddings.
+def _clipfit_teacher_image_embeddings(teacher, pixel_values):
+    outputs = teacher.vision_model(pixel_values=pixel_values)
+    pooled = getattr(outputs, "pooler_output", None)
+    if pooled is None:
+        pooled = outputs[1]
+    projected = teacher.visual_projection(pooled)
+    return F.normalize(projected, dim=-1)
+
+
 def _build_negative_text_inputs(dataset, image_keys, emotions, device, rng):
     negative_texts = []
 
@@ -336,15 +346,9 @@ def _run_epoch(model, loader, optimizer, scaler, use_amp, device, dataset, rng, 
                 if teacher is not None:
                     student_image_embeds = model.encode_images(batch["pixel_values"])
                     with torch.no_grad():
-                        # CLIPFIT: Extract the frozen teacher tensor explicitly for current Transformers APIs.
-                        teacher_outputs = teacher.vision_model(
-                            pixel_values=batch["pixel_values"]
+                        teacher_image_embeds = _clipfit_teacher_image_embeddings(
+                            teacher, batch["pixel_values"]
                         )
-                        teacher_pooled = getattr(teacher_outputs, "pooler_output", None)
-                        if teacher_pooled is None:
-                            teacher_pooled = teacher_outputs[1]
-                        teacher_image_embeds = teacher.visual_projection(teacher_pooled)
-                        teacher_image_embeds = F.normalize(teacher_image_embeds, dim=-1)
                     kd_loss = clipfit_kd_loss(student_image_embeds, teacher_image_embeds)
 
                 loss = bce_loss + float(getattr(Config, "CLIPFIT_KD_WEIGHT", 8.0)) * kd_loss
