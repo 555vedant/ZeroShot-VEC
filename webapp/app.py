@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import torch
 from pathlib import Path
 from flask import Flask, request, render_template, jsonify
@@ -10,9 +11,11 @@ from werkzeug.utils import secure_filename
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_ROOT))
 
+from src.dataset import format_emotion_prompt, normalize_emotion_text, resolve_image_path
+from src.inference import SearchEngine
 from src.model import CLIPFineTuner
-from src.dataset import format_emotion_prompt, resolve_image_path
 from transformers import CLIPProcessor
+from utils.helpers import load_json
 from utils.config import Config
 
 app = Flask(__name__)
@@ -35,25 +38,36 @@ config_checkpoint = Path(Config.CHECKPOINT_FILE)
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# 1. Load Model
-model = CLIPFineTuner().to(device)
 checkpoint_path = None
 if local_checkpoint.exists():
     checkpoint_path = local_checkpoint
 elif config_checkpoint.exists():
     checkpoint_path = config_checkpoint
 
+# 1. Load the shared model and artwork index.
+search_engine = None
 if checkpoint_path is not None:
-    state = torch.load(checkpoint_path, map_location=device)
-    model.load_checkpoint_state_dict(state)
+    try:
+        search_engine = SearchEngine(
+            checkpoint_path=checkpoint_path,
+            image_dir=app.config['UPLOAD_FOLDER'],
+        )
+        model = search_engine.model
+        processor = search_engine.processor
+    except ValueError as exc:
+        print(f"Warning: {exc}")
+        print("Starting without the upload image index. Upload an image before searching.")
+        model = CLIPFineTuner().to(device)
+        state = torch.load(checkpoint_path, map_location=device)
+        model.load_checkpoint_state_dict(state)
+        processor = CLIPProcessor.from_pretrained(Config.MODEL_NAME, use_fast=False)
+        search_engine = None
     print(f"Loaded checkpoint: {checkpoint_path}")
 else:
+    model = CLIPFineTuner().to(device)
     print("Warning: No checkpoint found. Using base model.")
-    
-model.eval()
 
-# 2. Load Processor
-processor = CLIPProcessor.from_pretrained(Config.MODEL_NAME, use_fast=False)
+model.eval()
 print("Model and Processor loaded successfully!", flush=True)
 
 EMOTION_LABELS = [
@@ -70,6 +84,51 @@ EMOTION_LABELS = [
 LOW_COSINE_THRESHOLD = 0.045
 MID_COSINE_THRESHOLD = 0.09
 HIGH_COSINE_THRESHOLD = 0.2
+
+
+def _load_rejection_thresholds():
+    path = Path(Config.REJECTION_CALIBRATION_FILE)
+    if not path.exists():
+        return None
+    try:
+        values = json.loads(path.read_text(encoding="utf-8"))
+        if "top1_threshold" not in values or "margin_threshold" not in values:
+            return None
+        return values
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+REJECTION_THRESHOLDS = _load_rejection_thresholds()
+
+
+def _select_emotion(emotion_scores, thresholds):
+    rejection = "Not a valid painting/emotion image"
+    if not emotion_scores or thresholds is None:
+        return rejection, True, 0.0
+
+    top_result = emotion_scores[0]
+    second_score = emotion_scores[1]["score"] if len(emotion_scores) > 1 else 0.0
+    margin = top_result["score"] - second_score
+    rejected = (
+        top_result["score"] < thresholds["top1_threshold"]
+        or margin < thresholds["margin_threshold"]
+    )
+    return (rejection if rejected else top_result["emotion"], rejected, margin)
+
+try:
+    raw_records = load_json(Config.DATA_FILE)
+    dataset_labels = sorted(
+        {
+            normalize_emotion_text(record.get("text", ""))
+            for record in raw_records
+            if record.get("text")
+        }
+    )
+except (OSError, TypeError, ValueError):
+    dataset_labels = []
+
+EMOTION_LABELS = sorted(set(EMOTION_LABELS).union(dataset_labels))
 
 
 def _calibrate_probability(prob_percent, cosine_sim):
@@ -101,8 +160,49 @@ def dataset_image():
         return "Not found", 404
     return send_file(str(resolved))
 
+
+@app.route('/search', methods=['POST'])
+def search_images():
+    query = request.form.get('query', '').strip()
+    try:
+        top_k = max(1, min(int(request.form.get('top_k', Config.SEARCH_TOP_K)), 50))
+    except (TypeError, ValueError):
+        top_k = Config.SEARCH_TOP_K
+
+    if not query:
+        return render_template(
+            'index.html',
+            error='Enter a text or emotion query to search.',
+            labels=EMOTION_LABELS,
+        )
+    if search_engine is None or not search_engine.data:
+        return render_template(
+            'index.html',
+            error='No uploaded images are available for text-to-image retrieval. Upload images first.',
+            labels=EMOTION_LABELS,
+        )
+
+    try:
+        search_results = search_engine.search_with_scores(query, top_k=top_k)
+    except Exception as exc:
+        return render_template(
+            'index.html',
+            error=f'Error during image retrieval: {exc}',
+            labels=EMOTION_LABELS,
+        )
+
+    return render_template(
+        'index.html',
+        labels=EMOTION_LABELS,
+        search_query=query,
+        search_results=search_results,
+        search_top_k=top_k,
+    )
+
 @app.route('/', methods=['GET', 'POST'])
 def index():
+    global search_engine, model, processor
+
     if request.method == 'POST':
         selected_label = request.form.get('label', '').strip().lower()
         if selected_label not in EMOTION_LABELS:
@@ -119,6 +219,17 @@ def index():
             filename = secure_filename(file.filename)
             filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             file.save(filepath)
+
+            if search_engine is None and checkpoint_path is not None:
+                try:
+                    search_engine = SearchEngine(
+                        checkpoint_path=checkpoint_path,
+                        image_dir=app.config['UPLOAD_FOLDER'],
+                    )
+                    model = search_engine.model
+                    processor = search_engine.processor
+                except ValueError:
+                    search_engine = None
             
             try:
                 # Open image
@@ -127,45 +238,35 @@ def index():
                 return render_template('index.html', error=f"Invalid image: {str(e)}")
             
             error = None
-            model_prompt = format_emotion_prompt(selected_label)
+            score = None
+            emotion_scores = []
+            predicted_label = "Not a valid painting/emotion image"
+            model_prompt = None
             try:
-                # Process inputs (match training prompt format)
-                inputs = processor(
-                    text=[model_prompt],
-                    images=image,
-                    return_tensors="pt",
-                    padding=True,
-                ).to(device)
-                
-                with torch.no_grad():
-                    # Compute logits the same way as training/eval (temperature-scaled)
-                    logits = model.pair_logits(
-                        pixel_values=inputs["pixel_values"],
-                        input_ids=inputs["input_ids"],
-                        attention_mask=inputs["attention_mask"],
-                        temperature=Config.TEMPERATURE,
-                    )
-                    similarity_prob = torch.sigmoid(logits).item() * 100.0
+                if search_engine is None:
+                    raise RuntimeError("Upload an image before running emotion inference.")
 
-                    # Debug cosine similarity (raw CLIP alignment score)
-                    image_embeds = model.encode_images(inputs["pixel_values"])
-                    text_embeds = model.encode_text(
-                        input_ids=inputs["input_ids"],
-                        attention_mask=inputs["attention_mask"],
-                    )
-                    cosine_sim = (image_embeds * text_embeds).sum(dim=-1).item()
-
-                similarity_prob = _calibrate_probability(similarity_prob, cosine_sim)
+                emotion_scores = search_engine.score_image_against_emotions(image, EMOTION_LABELS)
+                top_result = emotion_scores[0]
+                predicted_label, is_rejected, margin = _select_emotion(
+                    emotion_scores, REJECTION_THRESHOLDS
+                )
+                if REJECTION_THRESHOLDS is None:
+                    error = "Validation thresholds unavailable; run src/evaluate.py to calibrate rejection."
+                if not is_rejected:
+                    model_prompt = format_emotion_prompt(predicted_label)
+                score = f"{top_result['score']:.4f}"
 
             except Exception as e:
                 error = f"Error during inference: {str(e)}"
             
             return render_template(
                 'index.html', 
-                prompt=selected_label,
+                prompt=predicted_label,
                 model_prompt=model_prompt,
                 image_path=filename, 
-                score=f"{similarity_prob:.2f}%",
+                score=score,
+                emotion_scores=emotion_scores,
                 error=error,
                 labels=EMOTION_LABELS,
                 selected_label=selected_label

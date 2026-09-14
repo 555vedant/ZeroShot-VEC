@@ -21,9 +21,9 @@ if __name__ == "__main__":
 
     for query in TEST_QUERIES:
         q_start = time.time()
-        results = engine.search(query, top_k=Config.SEARCH_TOP_K)
+        results = engine.search_with_scores(query, top_k=Config.SEARCH_TOP_K)
 
         print(f"\nQuery: {query} | time={time.time() - q_start:.2f}s")
         print("Top matches:")
         for rank, result in enumerate(results, start=1):
-            print(f"{rank}. {result}")
+            print(f"{rank}. {result['image']} | similarity={result['score']:.4f}")

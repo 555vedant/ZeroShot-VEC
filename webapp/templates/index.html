@@ -6,7 +6,7 @@
     <title>Zero-Shot VEC Inference</title>
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f7f6; margin: 0; padding: 20px; }
-        .container { max-width: 520px; margin: 0 auto; background: white; padding: 24px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .container { max-width: 900px; margin: 0 auto; background: white; padding: 24px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
         h1 { text-align: center; color: #333; margin-top: 0; }
         .form-group { margin-bottom: 20px; }
         label { display: block; font-weight: bold; margin-bottom: 5px; color: #555; }
@@ -23,6 +23,15 @@
         .gallery-item { text-align: center; }
         .gallery-item img { width: 100%; height: 120px; object-fit: cover; border-radius: 4px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
         .gallery-item span { display: block; font-size: 12px; color: #666; margin-top: 5px; }
+        .section { margin-top: 28px; padding-top: 22px; border-top: 1px solid #e3e8eb; }
+        .search-row { display: flex; gap: 10px; }
+        .search-row input[type="text"] { flex: 1; min-width: 0; padding: 10px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        .search-row input[type="number"] { width: 80px; padding: 10px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        .search-row button { width: auto; white-space: nowrap; }
+        .score-table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        .score-table th, .score-table td { padding: 9px; border-bottom: 1px solid #e3e8eb; text-align: left; }
+        .score-table th:last-child, .score-table td:last-child { text-align: right; }
+        @media (max-width: 600px) { .search-row { flex-wrap: wrap; } .search-row input[type="text"] { flex-basis: 100%; } }
     </style>
 </head>
 <body>
@@ -47,6 +56,28 @@
             <button type="submit">Run Inference</button>
         </form>
 
+        <div class="section">
+            <h2>Text-to-Image Retrieval</h2>
+            <form method="POST" action="{{ url_for('search_images') }}">
+                <div class="search-row">
+                    <input type="text" name="query" value="{{ search_query or '' }}" placeholder="e.g. peaceful and contemplative" required>
+                    <input type="number" name="top_k" value="{{ search_top_k or 5 }}" min="1" max="50" aria-label="Number of results">
+                    <button type="submit">Search Images</button>
+                </div>
+            </form>
+
+            {% if search_results %}
+            <div class="gallery">
+                {% for result in search_results %}
+                <div class="gallery-item">
+                    <img src="{{ url_for('dataset_image', path=result.image) }}" alt="Rank {{ loop.index }} result">
+                    <span>#{{ loop.index }} | similarity {{ '%.4f'|format(result.score) }}</span>
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </div>
+
         {% if error %}
         <div class="error">
             <strong>Error:</strong> {{ error }}
@@ -60,12 +91,24 @@
             {% if model_prompt %}
             <p style="margin-top: -10px; color: #666;"><small>Model Prompt: {{ model_prompt }}</small></p>
             {% endif %}
-            <p><strong>Match Probability:</strong> <span style="font-size: 1.2em; font-weight: bold; color: #28a745;">{{ score }}</span></p>
+            <p><strong>Top-1 emotion logit:</strong> <span style="font-size: 1.2em; font-weight: bold; color: #28a745;">{{ score }}</span></p>
             
             <div class="image-preview">
                 <strong>Uploaded Image:</strong><br><br>
                 <img src="{{ url_for('uploaded_file', filename=image_path) }}" alt="Uploaded Image">
             </div>
+
+            {% if emotion_scores %}
+            <h4>Similarity Across Emotion Labels</h4>
+            <table class="score-table">
+                <thead><tr><th>Rank</th><th>Emotion</th><th>Cosine similarity</th></tr></thead>
+                <tbody>
+                {% for item in emotion_scores %}
+                <tr><td>{{ loop.index }}</td><td>{{ item.emotion }}</td><td>{{ '%.4f'|format(item.score) }}</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+            {% endif %}
         </div>
         {% endif %}
     </div>

@@ -3,6 +3,9 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 WEBAPP_DIR = PROJECT_ROOT / "webapp"
+LOCAL_WIKIART_PATH = PROJECT_ROOT / "data" / "Wikiart"
+LOCAL_ARTEMIS_PATH = PROJECT_ROOT / "data" / "artemis"
+LOCAL_WORK_DIR = PROJECT_ROOT / "data"
 
 
 def is_kaggle():
@@ -22,18 +25,16 @@ def is_colab():
 
 
 def resolve_local_wikiart_path() -> Path:
-    """Prefer an env override, else existing local WikiArt directory regardless of case."""
-    override = os.environ.get("WIKIART_PATH")
-    if override:
-        override_path = Path(override).expanduser()
-        if override_path.exists():
-            return override_path
-
-    candidates = [Path("./data/Wikiart"), Path("./data/wikiart")]
+    """Resolve the WikiArt directory from the repository's configured data location."""
+    candidates = [
+        LOCAL_WIKIART_PATH,
+        PROJECT_ROOT / "data" / "wikiart",
+        PROJECT_ROOT / "data" / "WikiArt",
+    ]
     for candidate in candidates:
         if candidate.exists():
-            return candidate
-    return candidates[0]
+            return candidate.resolve()
+    return candidates[0].resolve()
 
 
 class Config:
@@ -55,8 +56,8 @@ class Config:
 
     else:
         BASE_PATH = resolve_local_wikiart_path()
-        ARTEMIS_PATH = Path("./data/artemis")
-        WORK_DIR = Path("./data")
+        ARTEMIS_PATH = LOCAL_ARTEMIS_PATH
+        WORK_DIR = LOCAL_WORK_DIR
 
     @staticmethod
     def _prefer_webapp(default_path: Path, webapp_name: str) -> Path:
@@ -69,6 +70,7 @@ class Config:
 
     DATA_FILE = _prefer_webapp(WORK_DIR / "pairs.json", "pairs.json")
     CHECKPOINT_FILE = _prefer_webapp(WORK_DIR / "clip_model.pth", "clip_model.pth")
+    REJECTION_CALIBRATION_FILE = WORK_DIR / "rejection_thresholds.json"
 
     # MODEL
     MODEL_NAME = "openai/clip-vit-base-patch32"

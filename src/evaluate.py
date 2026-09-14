@@ -4,12 +4,14 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from pathlib import Path
 import random
+import json
 from PIL import Image
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from src.dataset import ArtDataset, collate_fn, processor, format_emotion_prompt, resolve_image_path
 from src.model import CLIPFineTuner
+from src.inference import calibrate_rejection_thresholds
 from utils.config import Config
 
 
@@ -177,6 +179,45 @@ def _ranking_metrics(model, dataset, candidate_emotions, device):
     }
 
 
+def _rejection_calibration(model, dataset, candidate_emotions, device):
+    candidate_prompts = [format_emotion_prompt(e) for e in candidate_emotions]
+    text_inputs = processor(
+        text=candidate_prompts,
+        return_tensors="pt",
+        padding="max_length",
+        truncation=True,
+        max_length=Config.TEXT_MAX_LENGTH,
+    )
+    text_inputs = {k: v.to(device) for k, v in text_inputs.items()}
+
+    with torch.no_grad():
+        text_emb = model.encode_text(
+            input_ids=text_inputs["input_ids"],
+            attention_mask=text_inputs["attention_mask"],
+        )
+
+    top1_scores = []
+    margins = []
+    for image_key in dataset.image_to_emotions:
+        image_path = resolve_image_path(image_key)
+        if image_path is None:
+            continue
+        try:
+            with Image.open(image_path) as img:
+                image = img.convert("RGB")
+            inputs = processor(images=image, return_tensors="pt")
+            inputs = {k: v.to(device) for k, v in inputs.items()}
+            with torch.no_grad():
+                image_emb = model.encode_images(pixel_values=inputs["pixel_values"])
+            scores = torch.sort((image_emb @ text_emb.T).squeeze(0) / Config.TEMPERATURE, descending=True).values
+            top1_scores.append(float(scores[0].item()))
+            margins.append(float((scores[0] - scores[1]).item()))
+        except Exception:
+            continue
+
+    return calibrate_rejection_thresholds(top1_scores, margins)
+
+
 def evaluate():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
@@ -300,6 +341,16 @@ def evaluate():
         candidate_emotions=candidate_emotions,
         device=device,
     )
+    rejection = _rejection_calibration(
+        model=model,
+        dataset=dataset,
+        candidate_emotions=candidate_emotions,
+        device=device,
+    )
+    calibration_path = Path(Config.REJECTION_CALIBRATION_FILE)
+    calibration_path.parent.mkdir(parents=True, exist_ok=True)
+    calibration_path.write_text(json.dumps(rejection, indent=2), encoding="utf-8")
+    print(f"Rejection calibration saved to: {calibration_path}")
 
     print(f"\nEvaluation Summary: Skipped batches={skipped_batches}")
     print("Pair Matching Metrics (Validation)")
