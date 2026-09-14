@@ -336,9 +336,14 @@ def _run_epoch(model, loader, optimizer, scaler, use_amp, device, dataset, rng, 
                 if teacher is not None:
                     student_image_embeds = model.encode_images(batch["pixel_values"])
                     with torch.no_grad():
-                        teacher_image_embeds = teacher.get_image_features(
+                        # CLIPFIT: Extract the frozen teacher tensor explicitly for current Transformers APIs.
+                        teacher_outputs = teacher.vision_model(
                             pixel_values=batch["pixel_values"]
                         )
+                        teacher_pooled = getattr(teacher_outputs, "pooler_output", None)
+                        if teacher_pooled is None:
+                            teacher_pooled = teacher_outputs[1]
+                        teacher_image_embeds = teacher.visual_projection(teacher_pooled)
                         teacher_image_embeds = F.normalize(teacher_image_embeds, dim=-1)
                     kd_loss = clipfit_kd_loss(student_image_embeds, teacher_image_embeds)
 
