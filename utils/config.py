@@ -70,7 +70,7 @@ class Config:
 
     DATA_FILE = _prefer_webapp(WORK_DIR / "pairs.json", "pairs.json")
     CHECKPOINT_FILE = _prefer_webapp(WORK_DIR / "clip_model.pth", "clip_model.pth")
-    REJECTION_CALIBRATION_FILE = WORK_DIR / "rejection_thresholds.json"
+    REJECTION_CALIBRATION_FILE = Path("/kaggle/working/rejection_thresholds.json")
 
     # MODEL
     MODEL_NAME = "openai/clip-vit-base-patch32"
