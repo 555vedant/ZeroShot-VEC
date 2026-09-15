@@ -8,4 +8,5 @@ __pycache__/
 # Optional: ignore compiled extensions
 *.so
 webapp/clip_model.pth
+webapp/clip_model1.pth
 webapp/uploads/
