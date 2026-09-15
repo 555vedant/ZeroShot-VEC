@@ -47,7 +47,7 @@ class Config:
     if IS_KAGGLE:
         BASE_PATH = Path("/kaggle/input/wikiart")
         ARTEMIS_PATH = Path("/kaggle/input/artemis-dataset")
-        WORK_DIR = Path("/kaggle/input/clip")
+        WORK_DIR = Path("/kaggle/input/models/vedantk555/clip/pytorch/default/1")
 
     elif IS_COLAB:
         BASE_PATH = Path("/root/.cache/kagglehub/datasets/steubk/wikiart/versions/1")
