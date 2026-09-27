@@ -87,7 +87,7 @@ class Config:
 
     # TRAINING
     BATCH_SIZE = 32
-    EPOCHS = 1
+    EPOCHS = 40
     CHECKPOINT_INTERVAL = 10
     # CLIPFIT: Select "full" for the existing baseline or "clipfit" for the experiment.
     FINE_TUNING_STRATEGY = "full"
