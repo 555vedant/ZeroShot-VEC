@@ -9,4 +9,4 @@ __pycache__/
 *.so
 webapp/clip_model.pth
 webapp/clip_model1.pth
-webapp/uploads/
+webapp/uploads/webapp/*.pth
