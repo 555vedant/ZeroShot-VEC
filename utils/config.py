@@ -47,17 +47,20 @@ class Config:
     if IS_KAGGLE:
         BASE_PATH = Path("/kaggle/input/wikiart")
         ARTEMIS_PATH = Path("/kaggle/input/artemis-dataset")
-        WORK_DIR = Path("/kaggle/input/models/vedantk555/clip/pytorch/default/1")
+        WORK_DIR = Path("/kaggle/working")
+        INPUT_MODEL_DIR = Path("/kaggle/input")
 
     elif IS_COLAB:
         BASE_PATH = Path("/root/.cache/kagglehub/datasets/steubk/wikiart/versions/1")
         ARTEMIS_PATH = Path("/root/.cache/kagglehub/datasets/samamostafa03/artemis-dataset/versions/1")
         WORK_DIR = Path("/content")
+        INPUT_MODEL_DIR = WORK_DIR
 
     else:
         BASE_PATH = resolve_local_wikiart_path()
         ARTEMIS_PATH = LOCAL_ARTEMIS_PATH
         WORK_DIR = LOCAL_WORK_DIR
+        INPUT_MODEL_DIR = WORK_DIR
 
     @staticmethod
     def _prefer_webapp(default_path: Path, webapp_name: str) -> Path:
@@ -69,8 +72,13 @@ class Config:
         return default_path
 
     DATA_FILE = _prefer_webapp(WORK_DIR / "pairs.json", "pairs.json")
-    CHECKPOINT_FILE = _prefer_webapp(WORK_DIR / "clip_model.pth", "clip_model.pth")
-    REJECTION_CALIBRATION_FILE = Path("/kaggle/working/rejection_thresholds.json")
+    CHECKPOINT_FILE = (
+        WORK_DIR / "clip_model.pth"
+        if IS_KAGGLE
+        else _prefer_webapp(WORK_DIR / "clip_model.pth", "clip_model.pth")
+    )
+    REJECTION_CALIBRATION_FILE = WORK_DIR / "rejection_thresholds.json"
+    PAINTING_GATE_THRESHOLD = 0.35
 
     # MODEL
     MODEL_NAME = "openai/clip-vit-base-patch32"
@@ -79,14 +87,16 @@ class Config:
 
     # TRAINING
     BATCH_SIZE = 32
-    EPOCHS = 10
+    EPOCHS = 1
+    CHECKPOINT_INTERVAL = 10
     # CLIPFIT: Select "full" for the existing baseline or "clipfit" for the experiment.
-    FINE_TUNING_STRATEGY = "clipfit"
+    FINE_TUNING_STRATEGY = "full"
     # CLIPFIT: Weight for frozen-teacher image representation distillation.
     CLIPFIT_KD_WEIGHT = 8.0
     LR = 5e-6
-    DEVICE = "cuda"
     VAL_SPLIT = 0.2
+    # Full-state checkpoints are written here so Kaggle can persist them as an output dataset.
+    TRAINING_CHECKPOINT_FILE = WORK_DIR / "training_checkpoint.pth"
     SPLIT_SEED = 42
     NEGATIVE_SEED = 123
 

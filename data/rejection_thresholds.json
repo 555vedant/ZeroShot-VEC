@@ -1,0 +1,6 @@
+{
+  "top1_threshold": 2.7916526794433594,
+  "margin_threshold": 0.005565095227211714,
+  "quantile": 0.05,
+  "samples": 3964
+}

@@ -14,6 +14,10 @@
         button { background-color: #007bff; color: white; border: none; padding: 12px 20px; width: 100%; border-radius: 4px; cursor: pointer; font-size: 16px; }
         button:hover { background-color: #0056b3; }
         .result { margin-top: 30px; padding: 20px; background-color: #e9f5ff; border-left: 5px solid #007bff; border-radius: 4px; }
+        .result.rejected { background-color: #e9f5ff; border-left-color: #007bff; }
+        .status { font-weight: bold; margin-bottom: 12px; }
+        .status.accepted { color: #198754; }
+        .status.rejected { color: #d9534f; }
         .error { color: #d9534f; background-color: #fdf7f7; padding: 15px; border-left: 5px solid #d9534f; margin-top: 20px; }
         
         .image-preview { text-align: center; margin: 15px 0; }
@@ -71,7 +75,7 @@
                 {% for result in search_results %}
                 <div class="gallery-item">
                     <img src="{{ url_for('dataset_image', path=result.image) }}" alt="Rank {{ loop.index }} result">
-                    <span>#{{ loop.index }} | similarity {{ '%.4f'|format(result.score) }}</span>
+                    <span>#{{ loop.index }} match</span>
                 </div>
                 {% endfor %}
             </div>
@@ -85,13 +89,14 @@
         {% endif %}
 
         {% if score %}
-        <div class="result">
+        <div class="result {% if is_rejected %}rejected{% endif %}">
             <h3>Results</h3>
+            <p class="status accepted">Emotion confidence is calibrated from the score separation.</p>
             <p><strong>Prompt:</strong> {{ prompt }}</p>
             {% if model_prompt %}
             <p style="margin-top: -10px; color: #666;"><small>Model Prompt: {{ model_prompt }}</small></p>
             {% endif %}
-            <p><strong>Top-1 emotion logit:</strong> <span style="font-size: 1.2em; font-weight: bold; color: #28a745;">{{ score }}</span></p>
+            <p><strong>Top emotion probability:</strong> <span style="font-size: 1.2em; font-weight: bold; color: #28a745;">{{ score }}</span></p>
             
             <div class="image-preview">
                 <strong>Uploaded Image:</strong><br><br>
@@ -99,12 +104,12 @@
             </div>
 
             {% if emotion_scores %}
-            <h4>Similarity Across Emotion Labels</h4>
+            <h4>Emotion probabilities</h4>
             <table class="score-table">
-                <thead><tr><th>Rank</th><th>Emotion</th><th>Cosine similarity</th></tr></thead>
+                <thead><tr><th>Rank</th><th>Emotion</th><th>Probability</th></tr></thead>
                 <tbody>
                 {% for item in emotion_scores %}
-                <tr><td>{{ loop.index }}</td><td>{{ item.emotion }}</td><td>{{ '%.4f'|format(item.score) }}</td></tr>
+                <tr><td>{{ loop.index }}</td><td>{{ item.emotion }}</td><td>{{ '%.1f%%'|format(item.probability * 100) }}</td></tr>
                 {% endfor %}
                 </tbody>
             </table>

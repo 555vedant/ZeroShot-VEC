@@ -79,6 +79,7 @@ EMOTION_LABELS = [
     "serenity",
     "loneliness",
     "melancholy",
+    "something_else",
 ]
 
 LOW_COSINE_THRESHOLD = 0.045
@@ -103,18 +104,13 @@ REJECTION_THRESHOLDS = _load_rejection_thresholds()
 
 
 def _select_emotion(emotion_scores, thresholds):
-    rejection = "Not a valid painting/emotion image"
-    if not emotion_scores or thresholds is None:
-        return rejection, True, 0.0
+    if not emotion_scores:
+        return "Unknown", False, 0.0
 
     top_result = emotion_scores[0]
-    second_score = emotion_scores[1]["score"] if len(emotion_scores) > 1 else 0.0
-    margin = top_result["score"] - second_score
-    rejected = (
-        top_result["score"] < thresholds["top1_threshold"]
-        or margin < thresholds["margin_threshold"]
-    )
-    return (rejection if rejected else top_result["emotion"], rejected, margin)
+    second_logit = emotion_scores[1]["logit"] if len(emotion_scores) > 1 else 0.0
+    margin = top_result["logit"] - second_logit
+    return top_result["emotion"], False, margin
 
 try:
     raw_records = load_json(Config.DATA_FILE)
@@ -242,20 +238,19 @@ def index():
             emotion_scores = []
             predicted_label = "Not a valid painting/emotion image"
             model_prompt = None
+            is_rejected = True
+            painting_probability = None
             try:
                 if search_engine is None:
                     raise RuntimeError("Upload an image before running emotion inference.")
 
+                painting_probability = search_engine.painting_probability(image)
                 emotion_scores = search_engine.score_image_against_emotions(image, EMOTION_LABELS)
-                top_result = emotion_scores[0]
                 predicted_label, is_rejected, margin = _select_emotion(
                     emotion_scores, REJECTION_THRESHOLDS
                 )
-                if REJECTION_THRESHOLDS is None:
-                    error = "Validation thresholds unavailable; run src/evaluate.py to calibrate rejection."
-                if not is_rejected:
-                    model_prompt = format_emotion_prompt(predicted_label)
-                score = f"{top_result['score']:.4f}"
+                model_prompt = format_emotion_prompt(predicted_label)
+                score = f"{emotion_scores[0]['probability'] * 100:.1f}%"
 
             except Exception as e:
                 error = f"Error during inference: {str(e)}"
@@ -267,6 +262,8 @@ def index():
                 image_path=filename, 
                 score=score,
                 emotion_scores=emotion_scores,
+                is_rejected=is_rejected,
+                painting_probability=painting_probability,
                 error=error,
                 labels=EMOTION_LABELS,
                 selected_label=selected_label

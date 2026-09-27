@@ -165,6 +165,32 @@ def _latest_epoch_checkpoint(ckpt_dir: Path):
     return checkpoints[-1][1]
 
 
+def _checkpoint_candidates():
+    candidates = []
+    full_state_candidates = []
+    other_candidates = []
+    resume_path = _to_abs(getattr(Config, "TRAINING_CHECKPOINT_FILE", Config.CHECKPOINT_FILE))
+    if resume_path.exists():
+        full_state_candidates.append(resume_path)
+
+    input_dir = _to_abs(getattr(Config, "INPUT_MODEL_DIR", Config.CHECKPOINT_FILE.parent))
+    if input_dir.exists():
+        for path in input_dir.rglob("*.pth"):
+            if path.is_file() and path not in candidates:
+                if path.name == resume_path.name:
+                    full_state_candidates.append(path)
+                else:
+                    other_candidates.append(path)
+
+    output_model = _to_abs(Config.CHECKPOINT_FILE)
+    if output_model.exists() and output_model not in full_state_candidates:
+        other_candidates.append(output_model)
+
+    candidates.extend(sorted(full_state_candidates, key=lambda path: path.stat().st_mtime, reverse=True))
+    candidates.extend(sorted(other_candidates, key=lambda path: path.stat().st_mtime, reverse=True))
+    return candidates
+
+
 def _cleanup_old_checkpoints(ckpt_dir: Path, keep=3):
     files = sorted(ckpt_dir.glob("epoch_*.pth"), key=_extract_epoch)
     if len(files) > keep:
@@ -174,53 +200,65 @@ def _cleanup_old_checkpoints(ckpt_dir: Path, keep=3):
 
 
 def _save_latest_checkpoint(ckpt_dir, epoch, model, optimizer, scaler):
-    if ckpt_dir is not None:
-        ckpt_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        Config.CHECKPOINT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    
-    # Save precisely as clip_model.pth natively according to config
-    checkpoint_path = Config.CHECKPOINT_FILE
-    
-    torch.save(
-        model.checkpoint_state_dict(),
-        checkpoint_path,
+    checkpoint_path = _to_abs(
+        getattr(Config, "TRAINING_CHECKPOINT_FILE", Config.CHECKPOINT_FILE)
     )
-    print(f"Saved latest model directly to: {checkpoint_path}")
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = checkpoint_path.with_suffix(".tmp")
+    payload = {
+        "checkpoint_version": 2,
+        "epoch": epoch + 1,
+        "model_state_dict": model.checkpoint_state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scaler_state_dict": scaler.state_dict() if scaler is not None else None,
+        "best_loss": getattr(model, "_best_loss", float("inf")),
+        "split_signature": getattr(model, "_split_signature", None),
+    }
+    torch.save(payload, temporary_path)
+    temporary_path.replace(checkpoint_path)
+    print(f"Saved resumable checkpoint after epoch {epoch + 1}: {checkpoint_path}")
 
 
 def _try_resume_training(model, optimizer, scaler, device, expected_split_signature=None):
-    checkpoint_path = Config.CHECKPOINT_FILE
-    
-    if not checkpoint_path.exists():
+    candidates = _checkpoint_candidates()
+    if not candidates:
         print("No existing checkpoint found. Starting fresh.")
         return 0, float("inf")
 
-    print(f"Loading checkpoint from {checkpoint_path}...")
-    try:
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-        # Attempt direct state dict load if we're saving direct dicts
+    for checkpoint_path in candidates:
+        print(f"Trying checkpoint: {checkpoint_path}")
         try:
-            model.load_checkpoint_state_dict(checkpoint)
-            print("Successfully resumed Direct Model.")
-            return 0, float("inf")
-        except Exception:
-            # Fallback backward compatibility from previous epoch format if needed
-            model.load_checkpoint_state_dict(checkpoint.get("model_state_dict", checkpoint))
-            
-            if "optimizer_state_dict" in checkpoint:
-                optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-            if "scaler_state_dict" in checkpoint and scaler is not None:
-                scaler.load_state_dict(checkpoint["scaler_state_dict"])
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+            is_full_checkpoint = isinstance(checkpoint, dict) and "model_state_dict" in checkpoint
+            state_dict = checkpoint["model_state_dict"] if is_full_checkpoint else checkpoint
+            model.load_checkpoint_state_dict(state_dict)
 
-        start_epoch = checkpoint.get("epoch", 0)
-        best_loss = checkpoint.get("best_loss", float("inf"))
-        
-        print(f"Successfully resumed from epoch {start_epoch}")
-        return start_epoch, best_loss
-    except Exception as e:
-        print(f"Failed to load checkpoint: {e}. Starting fresh.")
-        return 0, float("inf")
+            checkpoint_signature = checkpoint.get("split_signature") if is_full_checkpoint else None
+            if expected_split_signature and checkpoint_signature and checkpoint_signature != expected_split_signature:
+                print("Skipping checkpoint: zero-shot split does not match current data split.")
+                continue
+
+            if is_full_checkpoint:
+                optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+                if scaler is not None and checkpoint.get("scaler_state_dict"):
+                    scaler.load_state_dict(checkpoint["scaler_state_dict"])
+                start_epoch = int(checkpoint.get("epoch", 0))
+                best_loss = float(checkpoint.get("best_loss", float("inf")))
+            else:
+                start_epoch = 0
+                best_loss = float("inf")
+
+            remaining_epochs = max(0, int(Config.EPOCHS) - start_epoch)
+            print(
+                f"Resumed after epoch {start_epoch} using {checkpoint_path}. "
+                f"Remaining epochs: {remaining_epochs}"
+            )
+            return start_epoch, best_loss
+        except Exception as error:
+            print(f"Could not use {checkpoint_path}: {error}")
+
+    print("No compatible checkpoint found. Starting fresh.")
+    return 0, float("inf")
 
 def _compute_split_signature(split_plan):
     payload = {
@@ -243,14 +281,14 @@ def matching_bce_loss(pos_logits, neg_logits):
     return 0.5 * (pos_loss + neg_loss)
 
 
-# CLIPFIT: Knowledge distillation keeps the adapted image encoder close to frozen CLIP.
+# CLIPFIT: kd loss
 def clipfit_kd_loss(student_embeds, teacher_embeds):
     student_embeds = F.normalize(student_embeds, dim=-1)
     teacher_embeds = F.normalize(teacher_embeds, dim=-1)
     return 1.0 - (student_embeds * teacher_embeds).sum(dim=-1).mean()
 
 
-# CLIPFIT: Convert any Hugging Face vision output into projected image embeddings.
+# CLIPFIT:
 def _clipfit_teacher_image_embeddings(teacher, pixel_values):
     outputs = teacher.vision_model(pixel_values=pixel_values)
     pooled = getattr(outputs, "pooler_output", None)
@@ -557,17 +595,26 @@ def train():
             f"Val Total: {val_loss:.4f} (steps={val_steps}, skipped={val_skipped})"
         )
 
-        # Save best model
-        if val_loss < best_loss:
+        checkpoint_interval = max(1, int(getattr(Config, "CHECKPOINT_INTERVAL", 10)))
+        checkpoint_due = (
+            (epoch + 1) % checkpoint_interval == 0
+            or epoch + 1 == Config.EPOCHS
+        )
+
+        # Persist progress only at configured checkpoint boundaries.
+        if checkpoint_due and val_loss < best_loss:
             best_loss = val_loss
             best_path = _to_abs(Config.CHECKPOINT_FILE)
             best_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save(model.checkpoint_state_dict(), best_path)
             print(f"Saved BEST model at epoch {epoch + 1} to {best_path}")
 
-        # Save checkpoint directly as the exact best-loss model every epoch (or just only best)
         model._best_loss = best_loss
-        _save_latest_checkpoint(None, epoch, model, optimizer, scaler)
+        if checkpoint_due:
+            _save_latest_checkpoint(None, epoch, model, optimizer, scaler)
+        else:
+            print(f"Checkpoint skipped at epoch {epoch + 1}; next save at epoch "
+                  f"{min(Config.EPOCHS, ((epoch // checkpoint_interval) + 1) * checkpoint_interval)}")
 
     print("Training complete.")
 

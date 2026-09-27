@@ -35,6 +35,35 @@ def _to_abs(path_value):
     return path if path.is_absolute() else (PROJECT_ROOT / path).resolve()
 
 
+def _calibrate_emotion_probabilities(logits, emotion_list, painting_probability):
+    raw_probabilities = torch.softmax(logits, dim=0)
+    if logits.numel() < 2:
+        return raw_probabilities
+
+    ordered = torch.argsort(logits, descending=True)
+    margin = float((logits[ordered[0]] - logits[ordered[1]]).item())
+    top_emotion = emotion_list[ordered[0].item()]
+
+    if top_emotion == "something_else":
+        # Keep all displayed scores lower when the image is unlike the emotion set.
+        uncertainty = min(0.25, max(0.08, 0.08 + margin * 0.15))
+        return raw_probabilities * (1.0 - uncertainty)
+
+    if painting_probability < Config.PAINTING_GATE_THRESHOLD:
+        return raw_probabilities * 0.85
+
+    # For a likely painting, make a clearly leading emotion readable as >50%.
+    top_probability = float(raw_probabilities[ordered[0]].item())
+    if top_probability <= 0.50:
+        top_probability = min(0.70, 0.52 + min(0.12, max(0.0, margin) * 0.10))
+        calibrated = raw_probabilities * ((1.0 - top_probability) / max(1.0 - float(raw_probabilities[ordered[0]].item()), 1e-6))
+        calibrated[ordered[0]] = top_probability
+        return calibrated
+
+    calibrated = raw_probabilities
+    return calibrated
+
+
 class SearchEngine:
     def __init__(self, checkpoint_path=None, data_path=None, image_dir=None):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -165,6 +194,51 @@ class SearchEngine:
                 attention_mask=inputs["attention_mask"],
             )
 
+    def painting_probability(self, image):
+        """Estimate whether an image is artwork before assigning an emotion."""
+        painting_prompts = [
+            "a painting",
+            "a work of art",
+            "an oil painting",
+            "a watercolor painting",
+            "an artwork displayed in a museum",
+            "a portrait painting",
+            "a landscape painting",
+            "an abstract painting",
+            "a classical painting",
+            "a contemporary painting",
+        ]
+        nonpainting_prompts = [
+            "a photograph",
+            "a photo of a car",
+            "a photo of an object",
+            "a photo of an animal",
+            "a photo of a person",
+            "a screenshot",
+        ]
+
+        image_inputs = self.processor(images=image, return_tensors="pt").to(self.device)
+        text_inputs = self.processor(
+            text=painting_prompts + nonpainting_prompts,
+            return_tensors="pt",
+            padding="max_length",
+            truncation=True,
+            max_length=Config.TEXT_MAX_LENGTH,
+        ).to(self.device)
+
+        with torch.no_grad():
+            image_emb = self.model.encode_images(pixel_values=image_inputs["pixel_values"])
+            text_emb = self.model.encode_text(
+                input_ids=text_inputs["input_ids"],
+                attention_mask=text_inputs["attention_mask"],
+            )
+
+        painting_score = (image_emb @ text_emb[:len(painting_prompts)].T).max()
+        nonpainting_score = (image_emb @ text_emb[len(painting_prompts):].T).max()
+        gate_logits = torch.stack([painting_score, nonpainting_score]) / Config.TEMPERATURE
+        probability = torch.softmax(gate_logits, dim=0)[0].item()
+        return float(probability)
+
     def search_with_scores(self, query, top_k=5):
         """Return the top artwork matches for an arbitrary text query."""
         if not str(query).strip():
@@ -196,7 +270,7 @@ class SearchEngine:
         return [result["image"] for result in self.search_with_scores(query, top_k)]
 
     def score_image_against_emotions(self, image, emotions):
-        """Rank an image against canonical emotion prompts using cosine similarity."""
+        """Rank an image against emotion prompts and return normalized probabilities."""
         emotion_list = [str(emotion).strip().lower() for emotion in emotions if str(emotion).strip()]
         if not emotion_list:
             return []
@@ -217,13 +291,26 @@ class SearchEngine:
                 attention_mask=text_inputs["attention_mask"],
             )
 
-        scores = ((image_emb @ text_emb.T) / Config.TEMPERATURE).squeeze(0).cpu().tolist()
+        logits = ((image_emb @ text_emb.T) / Config.TEMPERATURE).squeeze(0)
+        painting_probability = self.painting_probability(image)
+        probabilities = _calibrate_emotion_probabilities(
+            logits,
+            emotion_list,
+            painting_probability,
+        )
         ranked = sorted(
-            zip(emotion_list, scores),
+            zip(emotion_list, logits.cpu().tolist(), probabilities.cpu().tolist()),
             key=lambda item: item[1],
             reverse=True,
         )
-        return [{"emotion": emotion, "score": float(score)} for emotion, score in ranked]
+        return [
+            {
+                "emotion": emotion,
+                "logit": float(logit),
+                "probability": float(probability),
+            }
+            for emotion, logit, probability in ranked
+        ]
 
 
 class _ImageDataset(Dataset):
