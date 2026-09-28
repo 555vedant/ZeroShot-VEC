@@ -1,4 +1,4 @@
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageOps
 from torch.utils.data import Dataset
 from transformers import CLIPProcessor
 from pathlib import Path
@@ -261,7 +261,14 @@ class ArtDataset(Dataset):
             }
         )
 
+        # Frequency-aware sampling keeps rare labels represented while avoiding
+        # negatives that are trivially unrelated to the positive label.
+        self.emotion_frequency = defaultdict(int)
+        for record in self.data:
+            self.emotion_frequency[record["emotion"]] += 1
+
         self.valid_count = len(self.data)
+        self.augment = split == "train"
 
     def __len__(self):
         return len(self.data)
@@ -279,7 +286,11 @@ class ArtDataset(Dataset):
         if not candidates:
             return None
 
-        return rng.choice(candidates)
+        # Most random negatives are too easy for a semantic matching task. Draw
+        # from the more common eligible labels so the model learns fine distinctions.
+        candidates.sort(key=lambda e: self.emotion_frequency.get(e, 0), reverse=True)
+        hard_pool = candidates[:max(1, min(len(candidates), 5))]
+        return rng.choice(hard_pool)
 
     def __getitem__(self, idx):
         item = self.data[idx]
@@ -294,6 +305,12 @@ class ArtDataset(Dataset):
         try:
             with Image.open(image_path) as img:
                 image = img.convert("RGB")
+            if self.augment:
+                if random.random() < 0.5:
+                    image = ImageOps.mirror(image)
+                # Keep color changes restrained because palette is meaningful in art.
+                image = ImageEnhance.Color(image).enhance(random.uniform(0.92, 1.08))
+                image = ImageEnhance.Brightness(image).enhance(random.uniform(0.94, 1.06))
         except Exception:
             return None
 

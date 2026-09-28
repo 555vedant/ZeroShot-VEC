@@ -27,7 +27,7 @@ class CLIPFineTuner(nn.Module):
         elif getattr(Config, "FINE_TUNING_STRATEGY", "full") != "full":
             raise ValueError("FINE_TUNING_STRATEGY must be 'full' or 'clipfit'.")
 
-    # CLIPFIT: The paper's image-side LayerNorm-only parameter-efficient setting.
+    # CLIPFit: text FFN output biases and image-side LayerNorms only.
     def _configure_clipfit_parameters(self):
         for parameter in self.model.parameters():
             parameter.requires_grad = False
@@ -36,6 +36,10 @@ class CLIPFineTuner(nn.Module):
             if isinstance(module, nn.LayerNorm):
                 for parameter in module.parameters():
                     parameter.requires_grad = True
+
+        # CLIPFit updates the second (output) linear layer bias in each text FFN.
+        for layer in self.model.text_model.encoder.layers:
+            layer.mlp.fc2.bias.requires_grad = True
 
     # CLIPFIT: Preserve the pretrained image representation as a frozen teacher.
     def create_clipfit_teacher(self):

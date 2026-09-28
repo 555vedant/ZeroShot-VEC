@@ -87,13 +87,13 @@ class Config:
 
     # TRAINING
     BATCH_SIZE = 32
-    EPOCHS = 40
+    EPOCHS = 1
     CHECKPOINT_INTERVAL = 10
-    # CLIPFIT: Select "full" for the existing baseline or "clipfit" for the experiment.
-    FINE_TUNING_STRATEGY = "full"
-    # CLIPFIT: Weight for frozen-teacher image representation distillation.
-    CLIPFIT_KD_WEIGHT = 8.0
-    LR = 5e-6
+    # Selective CLIPFit updates reduce forgetting on this relatively small dataset.
+    FINE_TUNING_STRATEGY = "clipfit"
+    # Weight for frozen-teacher image and text representation distillation.
+    CLIPFIT_KD_WEIGHT = 1.0
+    LR = 1e-5
     VAL_SPLIT = 0.2
     # Full-state checkpoints are written here so Kaggle can persist them as an output dataset.
     TRAINING_CHECKPOINT_FILE = WORK_DIR / "training_checkpoint.pth"
@@ -101,6 +101,8 @@ class Config:
     NEGATIVE_SEED = 123
 
     TEMPERATURE = 0.07
+    RANKING_LOSS_WEIGHT = 0.5
+    EARLY_STOPPING_PATIENCE = 5
 
     # improved
     FREEZE_VISION = True
@@ -111,7 +113,7 @@ class Config:
     UNFREEZE_TEXT_FINAL_LAYERNORM = True
 
     MIXED_PRECISION = True
-    WEIGHT_DECAY = 0.01
+    WEIGHT_DECAY = 0.001
     BACKBONE_LR_MULTIPLIER = 0.2
 
     # PERFORMANCE

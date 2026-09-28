@@ -36,32 +36,10 @@ def _to_abs(path_value):
 
 
 def _calibrate_emotion_probabilities(logits, emotion_list, painting_probability):
-    raw_probabilities = torch.softmax(logits, dim=0)
-    if logits.numel() < 2:
-        return raw_probabilities
-
-    ordered = torch.argsort(logits, descending=True)
-    margin = float((logits[ordered[0]] - logits[ordered[1]]).item())
-    top_emotion = emotion_list[ordered[0].item()]
-
-    if top_emotion == "something_else":
-        # Keep all displayed scores lower when the image is unlike the emotion set.
-        uncertainty = min(0.25, max(0.08, 0.08 + margin * 0.15))
-        return raw_probabilities * (1.0 - uncertainty)
-
-    if painting_probability < Config.PAINTING_GATE_THRESHOLD:
-        return raw_probabilities * 0.85
-
-    # For a likely painting, make a clearly leading emotion readable as >50%.
-    top_probability = float(raw_probabilities[ordered[0]].item())
-    if top_probability <= 0.50:
-        top_probability = min(0.70, 0.52 + min(0.12, max(0.0, margin) * 0.10))
-        calibrated = raw_probabilities * ((1.0 - top_probability) / max(1.0 - float(raw_probabilities[ordered[0]].item()), 1e-6))
-        calibrated[ordered[0]] = top_probability
-        return calibrated
-
-    calibrated = raw_probabilities
-    return calibrated
+    # Do not force a confident-looking winner by rewriting the softmax scores.
+    # The painting detector remains a separate signal in the UI; emotion scores
+    # reflect only the relative CLIP similarities among the requested labels.
+    return torch.softmax(logits, dim=0)
 
 
 class SearchEngine:

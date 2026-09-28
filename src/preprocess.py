@@ -101,10 +101,13 @@ def load_artemis_csv(artemis_root):
 # PARSE EMOTIONS
 def get_top_emotions(row, k=2):
     hist = ast.literal_eval(row["emotion_histogram"])
-
-    idx = sorted(range(len(hist)), key=lambda i: hist[i], reverse=True)[:k]
-
-    return [EMOTIONS[i] for i in idx]
+    if not hist or k <= 0:
+        return []
+    ranked = sorted(range(min(len(hist), len(EMOTIONS))), key=lambda i: hist[i], reverse=True)
+    cutoff = hist[ranked[min(k, len(ranked)) - 1]]
+    # Keep tied human annotations at the top-k boundary instead of arbitrarily
+    # discarding valid positive emotions.
+    return [EMOTIONS[i] for i in ranked if hist[i] >= cutoff and hist[i] > 0]
 
 
 # PREPROCESSING

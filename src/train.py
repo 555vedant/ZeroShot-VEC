@@ -266,6 +266,7 @@ def _compute_split_signature(split_plan):
         "holdout_emotions": sorted(split_plan.get("holdout_emotions", [])),
         "source": split_plan.get("source", "unknown"),
         "seed": int(getattr(Config, "ZERO_SHOT_SPLIT_SEED", getattr(Config, "SPLIT_SEED", 42))),
+        "fine_tuning_strategy": getattr(Config, "FINE_TUNING_STRATEGY", "full"),
     }
     serialized = json.dumps(payload, sort_keys=True, ensure_ascii=True)
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
@@ -278,7 +279,10 @@ def matching_bce_loss(pos_logits, neg_logits):
 
     pos_loss = F.binary_cross_entropy_with_logits(pos_logits, pos_targets)
     neg_loss = F.binary_cross_entropy_with_logits(neg_logits, neg_targets)  
-    return 0.5 * (pos_loss + neg_loss)
+    pointwise = 0.5 * (pos_loss + neg_loss)
+    # Explicitly optimize separation for each matched image and its negative.
+    ranking = F.softplus(0.2 + neg_logits - pos_logits).mean()
+    return pointwise + float(getattr(Config, "RANKING_LOSS_WEIGHT", 0.5)) * ranking
 
 
 # CLIPFIT: kd loss
@@ -383,11 +387,24 @@ def _run_epoch(model, loader, optimizer, scaler, use_amp, device, dataset, rng, 
                 kd_loss = torch.zeros((), device=device)
                 if teacher is not None:
                     student_image_embeds = model.encode_images(batch["pixel_values"])
+                    student_text_embeds = model.encode_text(
+                        input_ids=batch["input_ids"],
+                        attention_mask=batch["attention_mask"],
+                    )
                     with torch.no_grad():
                         teacher_image_embeds = _clipfit_teacher_image_embeddings(
                             teacher, batch["pixel_values"]
                         )
-                    kd_loss = clipfit_kd_loss(student_image_embeds, teacher_image_embeds)
+                        teacher_text_embeds = F.normalize(
+                            teacher.get_text_features(
+                                input_ids=batch["input_ids"],
+                                attention_mask=batch["attention_mask"],
+                            ), dim=-1
+                        )
+                    kd_loss = 0.5 * (
+                        clipfit_kd_loss(student_image_embeds, teacher_image_embeds)
+                        + clipfit_kd_loss(student_text_embeds, teacher_text_embeds)
+                    )
 
                 loss = bce_loss + float(getattr(Config, "CLIPFIT_KD_WEIGHT", 8.0)) * kd_loss
 
@@ -547,7 +564,7 @@ def train():
         return
 
     rng_train = random.Random(getattr(Config, "NEGATIVE_SEED", 123))
-    rng_val = random.Random(getattr(Config, "NEGATIVE_SEED", 123) + 1)
+    val_seed = getattr(Config, "NEGATIVE_SEED", 123) + 1
 
     print(f"Train pairs: {len(train_dataset)} | Val pairs: {len(val_dataset)}")
 
@@ -572,6 +589,8 @@ def train():
             raise RuntimeError("No valid training batches were produced.")
 
         if len(val_dataset) > 0:
+            # Reuse the same validation negatives each epoch for comparable model selection.
+            rng_val = random.Random(val_seed)
             val_loss, val_bce, val_kd, val_steps, val_skipped = _run_epoch(
                 model=model,
                 loader=val_loader,
@@ -595,15 +614,17 @@ def train():
             f"Val Total: {val_loss:.4f} (steps={val_steps}, skipped={val_skipped})"
         )
 
-        checkpoint_interval = max(1, int(getattr(Config, "CHECKPOINT_INTERVAL", 10)))
-        checkpoint_due = (
-            (epoch + 1) % checkpoint_interval == 0
-            or epoch + 1 == Config.EPOCHS
-        )
+        # Evaluate and checkpoint every epoch; delayed checkpointing can miss the
+        # best generalizing model on a small, noisy dataset.
+        checkpoint_due = True
+        # Select by supervised validation matching/ranking loss; KD is a training
+        # regularizer and should not decide which checkpoint is deployed.
+        selection_metric = val_bce
+        improved = selection_metric < best_loss
 
         # Persist progress only at configured checkpoint boundaries.
-        if checkpoint_due and val_loss < best_loss:
-            best_loss = val_loss
+        if improved:
+            best_loss = selection_metric
             best_path = _to_abs(Config.CHECKPOINT_FILE)
             best_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save(model.checkpoint_state_dict(), best_path)
@@ -612,9 +633,14 @@ def train():
         model._best_loss = best_loss
         if checkpoint_due:
             _save_latest_checkpoint(None, epoch, model, optimizer, scaler)
-        else:
-            print(f"Checkpoint skipped at epoch {epoch + 1}; next save at epoch "
-                  f"{min(Config.EPOCHS, ((epoch // checkpoint_interval) + 1) * checkpoint_interval)}")
+
+        patience = max(1, int(getattr(Config, "EARLY_STOPPING_PATIENCE", 5)))
+        stale_epochs = int(getattr(model, "_stale_epochs", 0))
+        stale_epochs = 0 if improved else stale_epochs + 1
+        model._stale_epochs = stale_epochs
+        if stale_epochs >= patience:
+            print(f"Early stopping after {stale_epochs} epochs without validation improvement.")
+            break
 
     print("Training complete.")
 
