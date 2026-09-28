@@ -395,11 +395,13 @@ def _run_epoch(model, loader, optimizer, scaler, use_amp, device, dataset, rng, 
                         teacher_image_embeds = _clipfit_teacher_image_embeddings(
                             teacher, batch["pixel_values"]
                         )
+                        teacher_text_output = teacher.get_text_features(
+                            input_ids=batch["input_ids"],
+                            attention_mask=batch["attention_mask"],
+                        )
                         teacher_text_embeds = F.normalize(
-                            teacher.get_text_features(
-                                input_ids=batch["input_ids"],
-                                attention_mask=batch["attention_mask"],
-                            ), dim=-1
+                            model._to_embedding_tensor(teacher_text_output, modality="text"),
+                            dim=-1,
                         )
                     kd_loss = 0.5 * (
                         clipfit_kd_loss(student_image_embeds, teacher_image_embeds)
