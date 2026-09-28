@@ -87,7 +87,7 @@ class Config:
 
     # TRAINING
     BATCH_SIZE = 32
-    EPOCHS = 1
+    EPOCHS = 30
     CHECKPOINT_INTERVAL = 10
     # Selective CLIPFit updates reduce forgetting on this relatively small dataset.
     FINE_TUNING_STRATEGY = "clipfit"
