@@ -86,7 +86,7 @@ class Config:
     TEXT_MAX_LENGTH = 77
 
     # TRAERINING
-    BATCH_SIZE = 32
+    BATCH_SIZE = 64
     EPOCHS = 25
     CHECKPOINT_INTVAL = 5
     # Selective CLIPFit updates reduce forgetting on this relatively small dataset.

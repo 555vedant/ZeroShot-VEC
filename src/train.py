@@ -23,6 +23,7 @@ from utils.config import Config
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_NEGATIVE_TEXT_CACHE = {}
 
 
 def _make_grad_scaler(use_amp: bool):
@@ -317,13 +318,25 @@ def _build_negative_text_inputs(dataset, image_keys, emotions, device, rng):
 
         negative_texts.append(format_emotion_prompt(neg_emotion))
 
-    neg_inputs = processor(
-        text=negative_texts,
-        return_tensors="pt",
-        padding="max_length",
-        truncation=True,
-        max_length=Config.TEXT_MAX_LENGTH,
-    )
+    cached_inputs = []
+    for text in negative_texts:
+        cached = _NEGATIVE_TEXT_CACHE.get(text)
+        if cached is None:
+            cached = processor(
+                text=[text],
+                return_tensors="pt",
+                padding="max_length",
+                truncation=True,
+                max_length=Config.TEXT_MAX_LENGTH,
+            )
+            cached = {key: value.cpu() for key, value in cached.items()}
+            _NEGATIVE_TEXT_CACHE[text] = cached
+        cached_inputs.append(cached)
+
+    neg_inputs = {
+        key: torch.cat([item[key] for item in cached_inputs], dim=0)
+        for key in cached_inputs[0]
+    }
 
     non_blocking = bool(getattr(Config, "NON_BLOCKING", True))
     return {k: v.to(device, non_blocking=non_blocking) for k, v in neg_inputs.items()}
