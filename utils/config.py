@@ -88,7 +88,7 @@ class Config:
     # TRAERINING
     BATCH_SIZE = 32
     EPOCHS = 25
-    CHECKPOINT_INTVAL = 10
+    CHECKPOINT_INTVAL = 5
     # Selective CLIPFit updates reduce forgetting on this relatively small dataset.
     FINE_TUNING_STRATEGY = "clipfit"
     # Weight for frozen-teacher image and text representation distillation.
