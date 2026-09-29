@@ -85,10 +85,10 @@ class Config:
     IMAGE_SIZE = 224
     TEXT_MAX_LENGTH = 77
 
-    # TRAINING
+    # TRAERINING
     BATCH_SIZE = 32
-    EPOCHS = 30
-    CHECKPOINT_INTERVAL = 10
+    EPOCHS = 25
+    CHECKPOINT_INTVAL = 10
     # Selective CLIPFit updates reduce forgetting on this relatively small dataset.
     FINE_TUNING_STRATEGY = "clipfit"
     # Weight for frozen-teacher image and text representation distillation.
