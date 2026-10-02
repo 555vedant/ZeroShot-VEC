@@ -72,10 +72,13 @@ class Config:
         return default_path
 
     DATA_FILE = _prefer_webapp(WORK_DIR / "pairs.json", "pairs.json")
-    CHECKPOINT_FILE = (
-        WORK_DIR / "clip_model.pth"
+    _default_checkpoint = (
+        Path("/kaggle/input/models/vedkasar/clip/pytorch/v1/1/25_clip.pth")
         if IS_KAGGLE
         else _prefer_webapp(WORK_DIR / "clip_model.pth", "clip_model.pth")
+    )
+    CHECKPOINT_FILE = Path(
+        os.getenv("CLIP_CHECKPOINT_PATH", str(_default_checkpoint))
     )
     REJECTION_CALIBRATION_FILE = WORK_DIR / "rejection_thresholds.json"
     PAINTING_GATE_THRESHOLD = 0.35
