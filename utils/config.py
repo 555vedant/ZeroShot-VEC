@@ -72,8 +72,11 @@ class Config:
         return default_path
 
     DATA_FILE = _prefer_webapp(WORK_DIR / "pairs.json", "pairs.json")
+    OUTPUT_MODELS_DIR = WORK_DIR / "models"
+    OUTPUT_LOGS_DIR = WORK_DIR / "logs"
+    OUTPUT_RESULTS_DIR = WORK_DIR / "results"
     _default_checkpoint = (
-        Path("/kaggle/input/models/vedkasar/clip/pytorch/v1/1/25_clip.pth")
+        OUTPUT_MODELS_DIR / "best_model.pt"
         if IS_KAGGLE
         else _prefer_webapp(WORK_DIR / "clip_model.pth", "clip_model.pth")
     )
@@ -108,8 +111,9 @@ class Config:
     CLIPFIT_KD_WEIGHT = 0.0
     LR = 5e-4
     VAL_SPLIT = 0.2
-    # Full-state checkpoints are written here so Kaggle can persist them as an output dataset.
-    TRAINING_CHECKPOINT_FILE = WORK_DIR / "training_checkpoint.pth"
+    TRAINING_CHECKPOINT_FILE = OUTPUT_MODELS_DIR / "latest_checkpoint.pt"
+    TRAINING_LOG_FILE = OUTPUT_LOGS_DIR / "training_history.csv"
+    EVALUATION_RESULTS_FILE = OUTPUT_RESULTS_DIR / "evaluation_results.json"
     SPLIT_SEED = 42
     NEGATIVE_SEED = 123
 
@@ -128,6 +132,7 @@ class Config:
     EARLY_STOPPING_PATIENCE = 5
 
     MIXED_PRECISION = True
+    GRADIENT_CLIP_NORM = 1.0
     WEIGHT_DECAY = 0.001
     BACKBONE_LR_MULTIPLIER = 0.2
 

@@ -5,6 +5,7 @@ import re
 import random
 import json
 import hashlib
+import csv
 
 import sys
 from pathlib import Path
@@ -145,7 +146,7 @@ def _to_abs(path_value):
 
 
 def _checkpoint_dir() -> Path:
-    return _to_abs(Config.CHECKPOINT_FILE).parent / "epoch_checkpoints"
+    return _to_abs(getattr(Config, "TRAINING_CHECKPOINT_FILE", Config.CHECKPOINT_FILE)).parent / "epoch_checkpoints"
 
 
 # CHECKPOINT UTILS
@@ -202,7 +203,7 @@ def _cleanup_old_checkpoints(ckpt_dir: Path, keep=3):
             print(f"Deleted old checkpoint: {f}")
 
 
-def _save_latest_checkpoint(ckpt_dir, epoch, model, optimizer, scaler):
+def _save_latest_checkpoint(ckpt_dir, epoch, model, optimizer, scaler, scheduler=None):
     checkpoint_path = _to_abs(
         getattr(Config, "TRAINING_CHECKPOINT_FILE", Config.CHECKPOINT_FILE)
     )
@@ -213,16 +214,24 @@ def _save_latest_checkpoint(ckpt_dir, epoch, model, optimizer, scaler):
         "epoch": epoch + 1,
         "model_state_dict": model.checkpoint_state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
         "scaler_state_dict": scaler.state_dict() if scaler is not None else None,
         "best_loss": getattr(model, "_best_loss", float("inf")),
         "split_signature": getattr(model, "_split_signature", None),
     }
     torch.save(payload, temporary_path)
     temporary_path.replace(checkpoint_path)
-    print(f"Saved resumable checkpoint after epoch {epoch + 1}: {checkpoint_path}")
+    print(f"Saved latest checkpoint after epoch {epoch + 1}: {checkpoint_path}")
 
 
-def _try_resume_training(model, optimizer, scaler, device, expected_split_signature=None):
+def _try_resume_training(
+    model,
+    optimizer,
+    scaler,
+    device,
+    expected_split_signature=None,
+    scheduler=None,
+):
     candidates = _checkpoint_candidates()
     if not candidates:
         print("No existing checkpoint found. Starting fresh.")
@@ -247,6 +256,8 @@ def _try_resume_training(model, optimizer, scaler, device, expected_split_signat
 
             if is_full_checkpoint:
                 optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+                if scheduler is not None and checkpoint.get("scheduler_state_dict"):
+                    scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
                 if scaler is not None and checkpoint.get("scaler_state_dict"):
                     scaler.load_state_dict(checkpoint["scaler_state_dict"])
                 start_epoch = int(checkpoint.get("epoch", 0))
@@ -290,6 +301,12 @@ def _target_epoch(start_epoch):
 
 # LOSS
 def matching_bce_loss(pos_logits, neg_logits, positive_weights=None):
+    return _matching_bce_components(
+        pos_logits, neg_logits, positive_weights=positive_weights
+    )["total"]
+
+
+def _matching_bce_components(pos_logits, neg_logits, positive_weights=None):
     pos_targets = torch.ones_like(pos_logits)
     neg_targets = torch.full_like(
         neg_logits,
@@ -312,7 +329,13 @@ def matching_bce_loss(pos_logits, neg_logits, positive_weights=None):
     ranking = (ranking * positive_weights).mean()
     negative_weight = float(getattr(Config, "NEGATIVE_LOSS_WEIGHT", 0.25))
     pointwise = pos_loss + negative_weight * neg_loss
-    return pointwise + float(getattr(Config, "RANKING_LOSS_WEIGHT", 0.5)) * ranking
+    total = pointwise + float(getattr(Config, "RANKING_LOSS_WEIGHT", 0.5)) * ranking
+    return {
+        "total": total,
+        "positive_loss": pos_loss,
+        "negative_loss": neg_loss,
+        "ranking_loss": ranking,
+    }
 
 
 # CLIPFIT: kd loss
@@ -404,10 +427,31 @@ def _build_positive_text_inputs(emotions, device):
     }
 
 
-def _run_epoch(model, loader, optimizer, scaler, use_amp, device, dataset, rng, train_mode, teacher=None):
+def _run_epoch(
+    model,
+    loader,
+    optimizer,
+    scaler,
+    use_amp,
+    device,
+    dataset,
+    rng,
+    train_mode,
+    teacher=None,
+    return_details=False,
+):
     total_loss = 0.0
     total_bce_loss = 0.0
     total_kd_loss = 0.0
+    total_positive_loss = 0.0
+    total_negative_loss = 0.0
+    total_ranking_loss = 0.0
+    total_positive_logit = 0.0
+    total_negative_logit = 0.0
+    total_valid_negatives = 0
+    total_gradient_norm = 0.0
+    nonfinite_batches = 0
+    batch_records = []
     steps = 0
     skipped = 0
 
@@ -488,9 +532,10 @@ def _run_epoch(model, loader, optimizer, scaler, use_amp, device, dataset, rng, 
                 positive_weights = positive_weights.clamp(
                     max=float(getattr(Config, "CLASS_WEIGHT_MAX", 4.0))
                 )
-                bce_loss = matching_bce_loss(
+                loss_components = _matching_bce_components(
                     pos_logits, neg_logits, positive_weights=positive_weights
                 )
+                bce_loss = loss_components["total"]
                 kd_loss = torch.zeros((), device=device)
                 if teacher is not None:
                     student_image_embeds = model.encode_images(batch["pixel_values"])
@@ -517,37 +562,162 @@ def _run_epoch(model, loader, optimizer, scaler, use_amp, device, dataset, rng, 
 
                 loss = bce_loss + float(getattr(Config, "CLIPFIT_KD_WEIGHT", 8.0)) * kd_loss
 
+        if not torch.isfinite(loss).item():
+            nonfinite_batches += 1
+            raise FloatingPointError(
+                f"Non-finite loss at {'train' if train_mode else 'validation'} batch {step}."
+            )
+
+        gradient_norm = 0.0
         if train_mode:
             if use_amp:
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                gradient_norm = float(
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(),
+                        float(getattr(Config, "GRADIENT_CLIP_NORM", 1.0)),
+                    ).item()
+                )
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                gradient_norm = float(
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(),
+                        float(getattr(Config, "GRADIENT_CLIP_NORM", 1.0)),
+                    ).item()
+                )
                 optimizer.step()
 
         total_loss += loss.item()
         total_bce_loss += bce_loss.item()
         total_kd_loss += kd_loss.item()
+        total_positive_loss += loss_components["positive_loss"].item()
+        total_negative_loss += loss_components["negative_loss"].item()
+        total_ranking_loss += loss_components["ranking_loss"].item()
+        total_positive_logit += pos_logits.detach().float().mean().item()
+        total_negative_logit += neg_logits.detach().float().mean().item()
+        valid_negative_count = sum(
+            1
+            for image_key in image_keys
+            if any(
+                name not in dataset.image_to_emotions.get(image_key, set())
+                for name in dataset.emotions
+            )
+        )
+        total_valid_negatives += valid_negative_count
+        total_gradient_norm += gradient_norm
         steps += 1
+
+        if return_details:
+            batch_records.append(
+                {
+                    "batch": step,
+                    "batch_bce": bce_loss.item(),
+                    "positive_pair_loss": loss_components["positive_loss"].item(),
+                    "negative_pair_loss": loss_components["negative_loss"].item(),
+                    "ranking_loss": loss_components["ranking_loss"].item(),
+                    "learning_rate": (
+                        optimizer.param_groups[0]["lr"] if optimizer is not None else 0.0
+                    ),
+                    "gradient_norm": gradient_norm,
+                    "positive_logit_avg": pos_logits.detach().float().mean().item(),
+                    "negative_logit_avg": neg_logits.detach().float().mean().item(),
+                    "emotion_distribution": json.dumps(
+                        {
+                            emotion: emotions.count(emotion)
+                            for emotion in sorted(set(emotions))
+                        },
+                        sort_keys=True,
+                    ),
+                    "valid_negatives": valid_negative_count,
+                    "skipped_batches": skipped,
+                    "nonfinite_batches": nonfinite_batches,
+                }
+            )
 
         if train_mode and step % 50 == 0:
             print(
                 f"Step {step} | BCE {bce_loss.item():.4f} | "
-                f"KD {kd_loss.item():.4f} | Total {loss.item():.4f}"
+                f"Pos {loss_components['positive_loss'].item():.4f} | "
+                f"Neg {loss_components['negative_loss'].item():.4f} | "
+                f"Rank {loss_components['ranking_loss'].item():.4f} | "
+                f"Grad {gradient_norm:.4f} | "
+                f"PosLogit {pos_logits.detach().float().mean().item():.4f} | "
+                f"NegLogit {neg_logits.detach().float().mean().item():.4f}"
             )
 
     avg_loss = total_loss / max(steps, 1)
-    return (
+    result = (
         avg_loss,
         total_bce_loss / max(steps, 1),
         total_kd_loss / max(steps, 1),
         steps,
         skipped,
     )
+    if not return_details:
+        return result
+    return {
+        "loss": avg_loss,
+        "bce": total_bce_loss / max(steps, 1),
+        "kd": total_kd_loss / max(steps, 1),
+        "positive_pair_loss": total_positive_loss / max(steps, 1),
+        "negative_pair_loss": total_negative_loss / max(steps, 1),
+        "ranking_loss": total_ranking_loss / max(steps, 1),
+        "positive_logit_avg": total_positive_logit / max(steps, 1),
+        "negative_logit_avg": total_negative_logit / max(steps, 1),
+        "learning_rate": (
+            optimizer.param_groups[0]["lr"] if optimizer is not None else 0.0
+        ),
+        "gradient_norm": total_gradient_norm / max(steps, 1),
+        "valid_negatives": total_valid_negatives,
+        "steps": steps,
+        "skipped": skipped,
+        "nonfinite_batches": nonfinite_batches,
+        "batch_records": batch_records,
+    }
+
+
+def _append_training_history(epoch, phase, metrics):
+    log_path = _to_abs(getattr(Config, "TRAINING_LOG_FILE"))
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    fields = [
+        "epoch", "phase", "batch", "batch_bce", "bce", "positive_pair_loss",
+        "negative_pair_loss", "ranking_loss", "learning_rate", "gradient_norm",
+        "positive_logit_avg", "negative_logit_avg", "emotion_distribution",
+        "valid_negatives", "skipped_batches", "nonfinite_batches",
+    ]
+    records = metrics.get("batch_records", [])
+    records.append(
+        {
+            "batch": "epoch_average",
+            "bce": metrics["bce"],
+            "positive_pair_loss": metrics["positive_pair_loss"],
+            "negative_pair_loss": metrics["negative_pair_loss"],
+            "ranking_loss": metrics["ranking_loss"],
+            "learning_rate": metrics["learning_rate"],
+            "gradient_norm": metrics["gradient_norm"],
+            "positive_logit_avg": metrics["positive_logit_avg"],
+            "negative_logit_avg": metrics["negative_logit_avg"],
+            "valid_negatives": metrics["valid_negatives"],
+            "skipped_batches": metrics["skipped"],
+            "nonfinite_batches": metrics["nonfinite_batches"],
+        }
+    )
+    write_header = not log_path.exists()
+    with log_path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        if write_header:
+            writer.writeheader()
+        for record in records:
+            row = {field: "" for field in fields}
+            row.update(record)
+            row["epoch"] = epoch
+            row["phase"] = phase
+            writer.writerow(row)
+    print(f"Training history updated: {log_path}")
 
 
 # TRAIN
@@ -661,9 +831,10 @@ def train():
     print(f"Frozen text parameters: {report['frozen_text']:,}")
 
     optimizer = _build_optimizer(model)
+    requested_epochs = max(1, int(getattr(Config, "EPOCHS", 1)))
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        T_max=max(1, int(Config.EPOCHS)),
+        T_max=requested_epochs,
         eta_min=float(getattr(Config, "LR", 1e-6)) * 0.05,
     )
 
@@ -679,6 +850,7 @@ def train():
         scaler,
         device,
         expected_split_signature=split_signature,
+        scheduler=scheduler,
     )
 
     additional_epochs = max(0, int(getattr(Config, "EPOCHS", 0)))
@@ -699,7 +871,7 @@ def train():
             f"(run epoch {epoch - start_epoch + 1}/{additional_epochs})"
         )
 
-        train_loss, train_bce, train_kd, train_steps, train_skipped = _run_epoch(
+        train_metrics = _run_epoch(
             model=model,
             loader=train_loader,
             optimizer=optimizer,
@@ -710,7 +882,13 @@ def train():
             rng=rng_train,
             train_mode=True,
             teacher=teacher,
+            return_details=True,
         )
+        train_loss = train_metrics["loss"]
+        train_bce = train_metrics["bce"]
+        train_kd = train_metrics["kd"]
+        train_steps = train_metrics["steps"]
+        train_skipped = train_metrics["skipped"]
 
         if train_steps == 0:
             raise RuntimeError("No valid training batches were produced.")
@@ -718,7 +896,7 @@ def train():
         if len(val_dataset) > 0:
             # Reuse the same validation negatives each epoch for comparable model selection.
             rng_val = random.Random(val_seed)
-            val_loss, val_bce, val_kd, val_steps, val_skipped = _run_epoch(
+            val_metrics = _run_epoch(
                 model=model,
                 loader=val_loader,
                 optimizer=optimizer,
@@ -729,9 +907,16 @@ def train():
                 rng=rng_val,
                 train_mode=False,
                 teacher=teacher,
+                return_details=True,
             )
+            val_loss = val_metrics["loss"]
+            val_bce = val_metrics["bce"]
+            val_kd = val_metrics["kd"]
+            val_steps = val_metrics["steps"]
+            val_skipped = val_metrics["skipped"]
         else:
             val_loss, val_bce, val_kd, val_steps, val_skipped = train_loss, train_bce, train_kd, 0, 0
+            val_metrics = train_metrics
 
         print(
             f"Epoch {epoch + 1} | Train BCE: {train_bce:.4f} | "
@@ -740,6 +925,8 @@ def train():
             f"Val BCE: {val_bce:.4f} | Val KD: {val_kd:.4f} | "
             f"Val Total: {val_loss:.4f} (steps={val_steps}, skipped={val_skipped})"
         )
+        _append_training_history(epoch + 1, "train", train_metrics)
+        _append_training_history(epoch + 1, "validation", val_metrics)
         scheduler.step()
         print(
             "Learning rates: "
@@ -759,12 +946,29 @@ def train():
             best_loss = selection_metric
             best_path = _to_abs(Config.CHECKPOINT_FILE)
             best_path.parent.mkdir(parents=True, exist_ok=True)
-            torch.save(model.checkpoint_state_dict(), best_path)
+            best_payload = {
+                "checkpoint_version": 2,
+                "epoch": epoch + 1,
+                "model_state_dict": model.checkpoint_state_dict(),
+                "best_validation_metric": best_loss,
+                "best_loss": best_loss,
+                "split_signature": split_signature,
+            }
+            temporary_best_path = best_path.with_suffix(".tmp")
+            torch.save(best_payload, temporary_best_path)
+            temporary_best_path.replace(best_path)
             print(f"Saved BEST model at epoch {epoch + 1} to {best_path}")
 
         model._best_loss = best_loss
         if checkpoint_due:
-            _save_latest_checkpoint(None, epoch, model, optimizer, scaler)
+            _save_latest_checkpoint(
+                None,
+                epoch,
+                model,
+                optimizer,
+                scaler,
+                scheduler=scheduler,
+            )
 
         patience = max(1, int(getattr(Config, "EARLY_STOPPING_PATIENCE", 5)))
         stale_epochs = int(getattr(model, "_stale_epochs", 0))

@@ -407,6 +407,23 @@ def evaluate():
     print(f"  Hit@3: {ranking['hit_at_3'] * 100:.2f}%")
     print(f"  MRR: {ranking['mrr']:.4f}")
 
+    results_path = Path(getattr(Config, "EVALUATION_RESULTS_FILE"))
+    results_path.parent.mkdir(parents=True, exist_ok=True)
+    results = {
+        "checkpoint": str(checkpoint_path),
+        "skipped_batches": skipped_batches,
+        "pair_matching": {
+            **metrics,
+            "auroc": auc,
+            "positive_pairs": len(pos_scores),
+            "negative_pairs": len(neg_scores),
+        },
+        "ranking": ranking,
+        "rejection_calibration": rejection,
+    }
+    results_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
+    print(f"Evaluation results saved to: {results_path}")
+
 
 if __name__ == "__main__":
     evaluate()
