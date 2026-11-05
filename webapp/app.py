@@ -59,6 +59,8 @@ if checkpoint_path is not None:
         print("Starting without the upload image index. Upload an image before searching.")
         model = CLIPFineTuner().to(device)
         state = torch.load(checkpoint_path, map_location=device)
+        if isinstance(state, dict) and "model_state_dict" in state:
+            state = state["model_state_dict"]
         model.load_checkpoint_state_dict(state)
         processor = CLIPProcessor.from_pretrained(Config.MODEL_NAME, use_fast=False)
         search_engine = None

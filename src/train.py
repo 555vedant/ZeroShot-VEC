@@ -6,6 +6,7 @@ import random
 import json
 import hashlib
 import csv
+import os
 
 import sys
 from pathlib import Path
@@ -171,27 +172,23 @@ def _latest_epoch_checkpoint(ckpt_dir: Path):
 
 def _checkpoint_candidates():
     candidates = []
-    full_state_candidates = []
-    other_candidates = []
     resume_path = _to_abs(getattr(Config, "TRAINING_CHECKPOINT_FILE", Config.CHECKPOINT_FILE))
     if resume_path.exists():
-        full_state_candidates.append(resume_path)
-
-    input_dir = _to_abs(getattr(Config, "INPUT_MODEL_DIR", Config.CHECKPOINT_FILE.parent))
-    if input_dir.exists():
-        for path in input_dir.rglob("*.pth"):
-            if path.is_file() and path not in candidates:
-                if path.name == resume_path.name:
-                    full_state_candidates.append(path)
-                else:
-                    other_candidates.append(path)
+        candidates.append(resume_path)
 
     output_model = _to_abs(Config.CHECKPOINT_FILE)
-    if output_model.exists() and output_model not in full_state_candidates:
-        other_candidates.append(output_model)
+    if output_model.exists() and output_model not in candidates:
+        candidates.append(output_model)
 
-    candidates.extend(sorted(full_state_candidates, key=lambda path: path.stat().st_mtime, reverse=True))
-    candidates.extend(sorted(other_candidates, key=lambda path: path.stat().st_mtime, reverse=True))
+    # Never recursively scan mounted Kaggle inputs. Users can provide one
+    # additional checkpoint explicitly through CLIP_CHECKPOINT_PATH.
+    explicit_path = os.getenv("CLIP_CHECKPOINT_PATH")
+    if explicit_path:
+        explicit_checkpoint = _to_abs(explicit_path)
+        if explicit_checkpoint.exists() and explicit_checkpoint not in candidates:
+            candidates.append(explicit_checkpoint)
+
+    candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
     return candidates
 
 

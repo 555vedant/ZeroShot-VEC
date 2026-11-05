@@ -141,10 +141,12 @@ class Config:
     GPU_IDS = None  # None means use every CUDA device visible to PyTorch.
     TF32 = True
 
-    NUM_WORKERS = max(2, min(8, os.cpu_count() or 2))
-    PREFETCH_FACTOR = 4
+    # Conservative Kaggle defaults avoid worker deadlocks and excessive
+    # prefetched image batches on mounted datasets.
+    NUM_WORKERS = 2 if IS_KAGGLE else max(2, min(8, os.cpu_count() or 2))
+    PREFETCH_FACTOR = 2
     PIN_MEMORY = True
-    PERSISTENT_WORKERS = True
+    PERSISTENT_WORKERS = False if IS_KAGGLE else True
     NON_BLOCKING = True
     DROP_LAST_MULTI_GPU_TRAIN = True
 

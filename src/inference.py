@@ -53,6 +53,8 @@ class SearchEngine:
         #  Load model
         self.model = CLIPFineTuner().to(self.device)
         state = torch.load(cp_path, map_location=self.device)
+        if isinstance(state, dict) and "model_state_dict" in state:
+            state = state["model_state_dict"]
         self.model.load_checkpoint_state_dict(state)
         self.model.eval()
 
