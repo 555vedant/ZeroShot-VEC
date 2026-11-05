@@ -6,7 +6,7 @@ from transformers import CLIPProcessor
 from torch.utils.data import DataLoader, Dataset
 
 from src.model import CLIPFineTuner
-from src.dataset import format_emotion_prompt, resolve_image_path
+from src.dataset import format_emotion_prompt, format_emotion_prompts, resolve_image_path
 from utils.helpers import load_json
 from utils.config import Config
 
@@ -254,8 +254,9 @@ class SearchEngine:
             return []
 
         image_inputs = self.processor(images=image, return_tensors="pt").to(self.device)
+        prompt_groups = [format_emotion_prompts(emotion) for emotion in emotion_list]
         text_inputs = self.processor(
-            text=[format_emotion_prompt(emotion) for emotion in emotion_list],
+            text=[prompt for prompts in prompt_groups for prompt in prompts],
             return_tensors="pt",
             padding="max_length",
             truncation=True,
@@ -264,10 +265,16 @@ class SearchEngine:
 
         with torch.no_grad():
             image_emb = self.model.encode_images(pixel_values=image_inputs["pixel_values"])
-            text_emb = self.model.encode_text(
+            prompt_emb = self.model.encode_text(
                 input_ids=text_inputs["input_ids"],
                 attention_mask=text_inputs["attention_mask"],
             )
+            text_emb = prompt_emb.view(
+                len(emotion_list),
+                -1,
+                prompt_emb.shape[-1],
+            ).mean(dim=1)
+            text_emb = F.normalize(text_emb, dim=-1)
 
         logits = ((image_emb @ text_emb.T) / Config.TEMPERATURE).squeeze(0)
         painting_probability = self.painting_probability(image)

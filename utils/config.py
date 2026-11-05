@@ -90,13 +90,23 @@ class Config:
 
     # TRAERINING
     BATCH_SIZE = 64
-    EPOCHS = 25
+    EPOCHS = 4
+    RESUME_ADDITIONAL_EPOCHS = True
     CHECKPOINT_INTVAL = 5
-    # Selective CLIPFit updates reduce forgetting on this relatively small dataset.
-    FINE_TUNING_STRATEGY = "clipfit"
-    # Weight for frozen-teacher image and text representation distillation.
-    CLIPFIT_KD_WEIGHT = 1.0
-    LR = 1e-5
+    FINE_TUNING_STRATEGY = "visual_lora"
+    FREEZE_TEXT_ENCODER = True
+    FREEZE_TEXT_PROJECTION = True
+    FREEZE_VISUAL_BACKBONE = True
+    LORA_TARGET = ["q", "v"]
+    LORA_TARGET_LAST_N_BLOCKS = 4
+    LORA_RANK = 8
+    LORA_ALPHA = 16
+    LORA_DROPOUT = 0.05
+    LORA_TRAIN_VISUAL_PROJECTION = False
+    LORA_TRAIN_VISUAL_NORMS = False
+    USE_KNOWLEDGE_DISTILLATION = False
+    CLIPFIT_KD_WEIGHT = 0.0
+    LR = 5e-4
     VAL_SPLIT = 0.2
     # Full-state checkpoints are written here so Kaggle can persist them as an output dataset.
     TRAINING_CHECKPOINT_FILE = WORK_DIR / "training_checkpoint.pth"
@@ -104,16 +114,18 @@ class Config:
     NEGATIVE_SEED = 123
 
     TEMPERATURE = 0.07
+    LOSS_TYPE = "multi_negative_ranking"
     RANKING_LOSS_WEIGHT = 0.5
+    NEGATIVE_COUNT = 3
+    NEGATIVE_HARD_FRACTION = 0.25
+    NEGATIVE_LOSS_WEIGHT = 0.25
+    NEGATIVE_TARGET = 0.1
+    CLASS_WEIGHT_POWER = 0.5
+    CLASS_WEIGHT_MAX = 4.0
+    WARMUP_RATIO = 0.1
+    SCHEDULER = "cosine"
+    EARLY_STOPPING_ENABLED = False
     EARLY_STOPPING_PATIENCE = 5
-
-    # improved
-    FREEZE_VISION = True
-    FREEZE_TEXT = False
-    UNFREEZE_VISION_TOP_LAYERS = 2
-    UNFREEZE_TEXT_TOP_LAYERS = 1
-    UNFREEZE_VISION_POST_LAYERNORM = True
-    UNFREEZE_TEXT_FINAL_LAYERNORM = True
 
     MIXED_PRECISION = True
     WEIGHT_DECAY = 0.001
@@ -121,6 +133,7 @@ class Config:
 
     # PERFORMANCE
     MULTI_GPU = True
+    GPU_IDS = None  # None means use every CUDA device visible to PyTorch.
     TF32 = True
 
     NUM_WORKERS = max(2, min(8, os.cpu_count() or 2))
@@ -145,3 +158,9 @@ class Config:
     ZERO_SHOT_HOLDOUT_MIN_COUNT = 1
     ZERO_SHOT_MIN_HOLDOUT_EMOTIONS = 1
     ZERO_SHOT_SPLIT_SEED = SPLIT_SEED
+    PROMPT_TEMPLATES = (
+        "a painting that evokes {emotion}",
+        "an artwork expressing {emotion}",
+        "a painting conveying a feeling of {emotion}",
+        "an artwork associated with {emotion}",
+    )

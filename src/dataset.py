@@ -31,6 +31,14 @@ def format_emotion_prompt(emotion):
     return f"{PROMPT_PREFIX}{str(emotion).strip().lower()}"
 
 
+def format_emotion_prompts(emotion):
+    templates = getattr(Config, "PROMPT_TEMPLATES", None)
+    if not templates:
+        return [format_emotion_prompt(emotion)]
+    value = str(emotion).strip().lower()
+    return [template.format(emotion=value) for template in templates]
+
+
 def _normalize_emotion_list(items):
     if not items:
         return []
@@ -173,6 +181,7 @@ class ArtDataset(Dataset):
         split_seed=42,
         allowed_emotions: Optional[Sequence[str]] = None,
         excluded_emotions: Optional[Sequence[str]] = None,
+        excluded_image_keys: Optional[Sequence[str]] = None,
     ):
         if split not in {"train", "val", "all"}:
             raise ValueError("split must be one of: train, val, all")
@@ -181,6 +190,7 @@ class ArtDataset(Dataset):
         grouped = defaultdict(list)
         allowed_set: Optional[Set[str]] = None
         excluded_set: Set[str] = set()
+        excluded_images = {str(key) for key in (excluded_image_keys or [])}
 
         if allowed_emotions is not None:
             allowed_set = set(_normalize_emotion_list(allowed_emotions))
@@ -194,6 +204,8 @@ class ArtDataset(Dataset):
             image_rel = str(item.get("image_rel", "")).strip()
             text = str(item.get("text", "")).strip()
             if not image_key or not text:
+                continue
+            if image_key in excluded_images:
                 continue
 
             resolved = path_cache.get((image_key, image_rel))

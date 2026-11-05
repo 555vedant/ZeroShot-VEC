@@ -63,6 +63,14 @@ This preserves general visual and language knowledge while adapting the model to
 
 **Loss function** — symmetric contrastive loss over batches of image–emotion pairs. Correct pairs are pulled together in the embedding space; incorrect pairs are pushed apart. The final loss is the average of image-to-text and text-to-image losses.
 
+The current training configuration uses visual LoRA adapters on the query and
+value projections of the final four vision blocks. The CLIP text encoder,
+text projection, and base visual weights remain frozen. Training also uses
+weighted multi-negative ranking, dynamic negatives that exclude all valid
+emotions for an image, cosine learning-rate decay, and prompt-ensemble
+evaluation. The source `pairs.json` is never regenerated automatically when
+it already exists.
+
 ---
 
 ## Zero-Shot Capability
@@ -70,6 +78,10 @@ This preserves general visual and language knowledge while adapting the model to
 During training, the model sees a fixed set of emotions such as joy, sadness, anger, fear, and awe. At inference, it can score unseen emotions like `serenity`, `loneliness`, or `melancholy` by encoding them into the same embedding space — no retraining required.
 
 This works because the model learns the underlying meaning of emotions rather than memorizing fixed labels.
+
+Zero-shot training removes every image containing a held-out emotion from the
+training split, including that image's other emotion record. This prevents
+image-level leakage between seen-emotion training and unseen-emotion evaluation.
 
 ---
 
@@ -82,4 +94,3 @@ This works because the model learns the underlying meaning of emotions rather th
 | Zero-shot        | Works on emotions not seen during training       |
 
 ---
-

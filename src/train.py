@@ -15,10 +15,10 @@ from src.dataset import (
     collate_fn,
     processor,
     format_emotion_prompt,
+    format_emotion_prompts,
     compute_zero_shot_emotion_split,
 )
 from src.model import CLIPFineTuner
-from src.preprocess import preprocess
 from utils.config import Config
 
 
@@ -100,6 +100,8 @@ def _build_optimizer(model):
             or name.startswith("model.module.vision_model.")
             or name.startswith("model.module.text_model.")
         )
+        if "lora_A" in name or "lora_B" in name:
+            is_backbone = False
 
         if is_backbone:
             backbone_params.append(param)
@@ -232,6 +234,10 @@ def _try_resume_training(model, optimizer, scaler, device, expected_split_signat
             checkpoint = torch.load(checkpoint_path, map_location=device)
             is_full_checkpoint = isinstance(checkpoint, dict) and "model_state_dict" in checkpoint
             state_dict = checkpoint["model_state_dict"] if is_full_checkpoint else checkpoint
+            if getattr(Config, "FINE_TUNING_STRATEGY", "") == "visual_lora":
+                if not any("lora_A" in key or "lora_B" in key for key in state_dict):
+                    print("Skipping legacy checkpoint without visual LoRA parameters.")
+                    continue
             model.load_checkpoint_state_dict(state_dict)
 
             checkpoint_signature = checkpoint.get("split_signature") if is_full_checkpoint else None
@@ -249,10 +255,12 @@ def _try_resume_training(model, optimizer, scaler, device, expected_split_signat
                 start_epoch = 0
                 best_loss = float("inf")
 
-            remaining_epochs = max(0, int(Config.EPOCHS) - start_epoch)
+            additional_epochs = max(0, int(getattr(Config, "EPOCHS", 0)))
+            target_epoch = _target_epoch(start_epoch)
             print(
                 f"Resumed after epoch {start_epoch} using {checkpoint_path}. "
-                f"Remaining epochs: {remaining_epochs}"
+                f"Additional epochs requested: {additional_epochs} | "
+                f"new target epoch: {target_epoch}"
             )
             return start_epoch, best_loss
         except Exception as error:
@@ -273,16 +281,37 @@ def _compute_split_signature(split_plan):
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
-# LOSS
-def matching_bce_loss(pos_logits, neg_logits):
-    pos_targets = torch.ones_like(pos_logits)
-    neg_targets = torch.zeros_like(neg_logits)
+def _target_epoch(start_epoch):
+    requested_epochs = max(0, int(getattr(Config, "EPOCHS", 0)))
+    if bool(getattr(Config, "RESUME_ADDITIONAL_EPOCHS", True)):
+        return int(start_epoch) + requested_epochs
+    return requested_epochs
 
-    pos_loss = F.binary_cross_entropy_with_logits(pos_logits, pos_targets)
-    neg_loss = F.binary_cross_entropy_with_logits(neg_logits, neg_targets)  
-    pointwise = 0.5 * (pos_loss + neg_loss)
-    # Explicitly optimize separation for each matched image and its negative.
-    ranking = F.softplus(0.2 + neg_logits - pos_logits).mean()
+
+# LOSS
+def matching_bce_loss(pos_logits, neg_logits, positive_weights=None):
+    pos_targets = torch.ones_like(pos_logits)
+    neg_targets = torch.full_like(
+        neg_logits,
+        float(getattr(Config, "NEGATIVE_TARGET", 0.1)),
+    )
+
+    if positive_weights is None:
+        positive_weights = torch.ones_like(pos_logits)
+    positive_weights = positive_weights / positive_weights.mean().clamp_min(1e-6)
+    pos_loss = F.binary_cross_entropy_with_logits(
+        pos_logits, pos_targets, weight=positive_weights
+    )
+    neg_weights = positive_weights.unsqueeze(1).expand_as(neg_logits)
+    neg_loss = F.binary_cross_entropy_with_logits(
+        neg_logits, neg_targets, weight=neg_weights
+    )
+    # Compare every sampled negative with the strongest negative for the image.
+    hardest_negative = neg_logits.max(dim=1).values
+    ranking = F.softplus(0.2 + hardest_negative - pos_logits)
+    ranking = (ranking * positive_weights).mean()
+    negative_weight = float(getattr(Config, "NEGATIVE_LOSS_WEIGHT", 0.25))
+    pointwise = pos_loss + negative_weight * neg_loss
     return pointwise + float(getattr(Config, "RANKING_LOSS_WEIGHT", 0.5)) * ranking
 
 
@@ -305,18 +334,28 @@ def _clipfit_teacher_image_embeddings(teacher, pixel_values):
 
 def _build_negative_text_inputs(dataset, image_keys, emotions, device, rng):
     negative_texts = []
+    negative_count = max(1, int(getattr(Config, "NEGATIVE_COUNT", 4)))
 
     for image_key, emotion in zip(image_keys, emotions):
-        neg_emotion = dataset.sample_negative_emotion(
-            image_key=image_key,
-            current_emotion=emotion,
-            rng=rng,
+        candidates = [
+            emotion_name
+            for emotion_name in dataset.emotions
+            if emotion_name not in dataset.image_to_emotions.get(image_key, set())
+        ]
+        if not candidates:
+            candidates = [emotion]
+        candidates.sort(key=lambda name: dataset.emotion_frequency.get(name, 0), reverse=True)
+        hard_count = min(
+            len(candidates),
+            max(1, round(negative_count * float(getattr(Config, "NEGATIVE_HARD_FRACTION", 0.5)))),
         )
-
-        if neg_emotion is None:
-            neg_emotion = emotion
-
-        negative_texts.append(format_emotion_prompt(neg_emotion))
+        selected = candidates[:hard_count]
+        remaining = [name for name in candidates if name not in selected]
+        rng.shuffle(remaining)
+        selected.extend(remaining[: max(0, negative_count - len(selected))])
+        selected.extend([selected[-1]] * max(0, negative_count - len(selected)))
+        for name in selected[:negative_count]:
+            negative_texts.extend(format_emotion_prompts(name))
 
     cached_inputs = []
     for text in negative_texts:
@@ -339,7 +378,30 @@ def _build_negative_text_inputs(dataset, image_keys, emotions, device, rng):
     }
 
     non_blocking = bool(getattr(Config, "NON_BLOCKING", True))
-    return {k: v.to(device, non_blocking=non_blocking) for k, v in neg_inputs.items()}
+    return {
+        k: v.to(device, non_blocking=non_blocking)
+        for k, v in neg_inputs.items()
+    }
+
+
+def _build_positive_text_inputs(emotions, device):
+    texts = [
+        prompt
+        for emotion in emotions
+        for prompt in format_emotion_prompts(emotion)
+    ]
+    inputs = processor(
+        text=texts,
+        return_tensors="pt",
+        padding="max_length",
+        truncation=True,
+        max_length=Config.TEXT_MAX_LENGTH,
+    )
+    non_blocking = bool(getattr(Config, "NON_BLOCKING", True))
+    return {
+        key: value.to(device, non_blocking=non_blocking)
+        for key, value in inputs.items()
+    }
 
 
 def _run_epoch(model, loader, optimizer, scaler, use_amp, device, dataset, rng, train_mode, teacher=None):
@@ -371,6 +433,17 @@ def _run_epoch(model, loader, optimizer, scaler, use_amp, device, dataset, rng, 
 
         batch = _move_to_device(batch, device=device, non_blocking=non_blocking)
         neg_inputs = _build_negative_text_inputs(dataset, image_keys, emotions, device, rng)
+        negative_count = max(1, int(getattr(Config, "NEGATIVE_COUNT", 4)))
+        prompt_count = len(format_emotion_prompts(emotions[0]))
+        positive_inputs = _build_positive_text_inputs(emotions, device)
+        negative_pixel_values = batch["pixel_values"].repeat_interleave(
+            negative_count * prompt_count,
+            dim=0,
+        )
+        positive_pixel_values = batch["pixel_values"].repeat_interleave(
+            prompt_count,
+            dim=0,
+        )
 
         if train_mode:
             optimizer.zero_grad(set_to_none=True)
@@ -383,20 +456,41 @@ def _run_epoch(model, loader, optimizer, scaler, use_amp, device, dataset, rng, 
         with torch.set_grad_enabled(train_mode):
             with autocast_ctx:
                 pos_logits = model.pair_logits(
-                    pixel_values=batch["pixel_values"],
-                    input_ids=batch["input_ids"],
-                    attention_mask=batch["attention_mask"],
+                    pixel_values=positive_pixel_values,
+                    input_ids=positive_inputs["input_ids"],
+                    attention_mask=positive_inputs["attention_mask"],
                     temperature=Config.TEMPERATURE,
                 )
+                pos_logits = pos_logits.view(len(emotions), prompt_count).mean(dim=1)
 
                 neg_logits = model.pair_logits(
-                    pixel_values=batch["pixel_values"],
+                    pixel_values=negative_pixel_values,
                     input_ids=neg_inputs["input_ids"],
                     attention_mask=neg_inputs["attention_mask"],
                     temperature=Config.TEMPERATURE,
                 )
+                neg_logits = neg_logits.view(
+                    len(emotions),
+                    negative_count,
+                    prompt_count,
+                ).mean(dim=2)
 
-                bce_loss = matching_bce_loss(pos_logits, neg_logits)
+                frequencies = torch.tensor(
+                    [
+                        dataset.emotion_frequency.get(emotion, 1)
+                        for emotion in emotions
+                    ],
+                    dtype=pos_logits.dtype,
+                    device=device,
+                )
+                power = float(getattr(Config, "CLASS_WEIGHT_POWER", 0.5))
+                positive_weights = frequencies.clamp_min(1.0).pow(-power)
+                positive_weights = positive_weights.clamp(
+                    max=float(getattr(Config, "CLASS_WEIGHT_MAX", 4.0))
+                )
+                bce_loss = matching_bce_loss(
+                    pos_logits, neg_logits, positive_weights=positive_weights
+                )
                 kd_loss = torch.zeros((), device=device)
                 if teacher is not None:
                     student_image_embeds = model.encode_images(batch["pixel_values"])
@@ -468,6 +562,11 @@ def train():
     split_plan = compute_zero_shot_emotion_split(all_dataset.data)
     seen_emotions = split_plan["seen_emotions"]
     holdout_emotions = split_plan["holdout_emotions"]
+    holdout_image_keys = {
+        image_key
+        for image_key, emotions in all_dataset.image_to_emotions.items()
+        if set(emotions).intersection(holdout_emotions)
+    }
     split_signature = _compute_split_signature(split_plan)
 
     print(
@@ -481,41 +580,32 @@ def train():
         val_ratio=val_split,
         split_seed=split_seed,
         allowed_emotions=seen_emotions,
+        excluded_image_keys=holdout_image_keys,
     )
     val_dataset = ArtDataset(
         split="val",
         val_ratio=val_split,
         split_seed=split_seed,
         allowed_emotions=seen_emotions,
+        excluded_image_keys=holdout_image_keys,
     )
 
     if len(train_dataset) == 0:
-        print("No valid training pairs found. Rebuilding pairs.json via preprocess()...")
-        preprocess()
-        all_dataset = ArtDataset(split="all", val_ratio=val_split, split_seed=split_seed)
-        split_plan = compute_zero_shot_emotion_split(all_dataset.data)
-        seen_emotions = split_plan["seen_emotions"]
-        holdout_emotions = split_plan["holdout_emotions"]
-        split_signature = _compute_split_signature(split_plan)
-
-        train_dataset = ArtDataset(
-            split="train",
-            val_ratio=val_split,
-            split_seed=split_seed,
-            allowed_emotions=seen_emotions,
-        )
-        val_dataset = ArtDataset(
-            split="val",
-            val_ratio=val_split,
-            split_seed=split_seed,
-            allowed_emotions=seen_emotions,
+        raise RuntimeError(
+            "Training split is empty because no source images could be resolved. "
+            "Configure Config.BASE_PATH or WIKIART_PATH; pairs.json was not modified."
         )
 
     gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    configured_gpu_ids = getattr(Config, "GPU_IDS", None)
+    if configured_gpu_ids is None:
+        active_gpu_ids = list(range(gpu_count))
+    else:
+        active_gpu_ids = [int(device_id) for device_id in configured_gpu_ids]
+    active_gpu_count = len(active_gpu_ids) if device == "cuda" else 0
     train_drop_last = (
         bool(getattr(Config, "DROP_LAST_MULTI_GPU_TRAIN", True))
-        and device == "cuda"
-        and gpu_count > 1
+        and active_gpu_count > 1
         and len(train_dataset) >= int(Config.BATCH_SIZE)
     )
 
@@ -531,34 +621,51 @@ def train():
         batch_size=getattr(Config, "EVAL_BATCH_SIZE", Config.BATCH_SIZE),
     )
 
-    if len(train_dataset) == 0:
-        raise RuntimeError(
-            "Training split is empty after rebuild. Dataset paths are likely invalid in this runtime. "
-            "Run preprocess.py and verify Config.BASE_PATH points to mounted WikiArt data."
-        )
-
     model = CLIPFineTuner().to(device)
 
     # CLIPFIT: Create the teacher before any checkpoint can alter the student.
-    teacher = model.create_clipfit_teacher().to(device) if getattr(
-        Config, "FINE_TUNING_STRATEGY", "full"
-    ) == "clipfit" else None
+    teacher = (
+        model.create_clipfit_teacher().to(device)
+        if getattr(Config, "FINE_TUNING_STRATEGY", "visual_lora") == "clipfit"
+        and bool(getattr(Config, "USE_KNOWLEDGE_DISTILLATION", False))
+        else None
+    )
 
-    if device == "cuda" and getattr(Config, "MULTI_GPU", True) and gpu_count > 1:
+    if (
+        device == "cuda"
+        and getattr(Config, "MULTI_GPU", True)
+        and active_gpu_count > 1
+    ):
         model.enable_data_parallel()
-        print(f"Using DataParallel on {gpu_count} GPUs")
+        print(
+            f"Using DataParallel on GPUs {active_gpu_ids}: "
+            + ", ".join(torch.cuda.get_device_name(i) for i in active_gpu_ids)
+        )
+        if not model.is_data_parallel():
+            raise RuntimeError("Multi-GPU was requested but DataParallel is disabled.")
+    elif device == "cuda":
+        print(f"Using single CUDA GPU: {active_gpu_ids[0] if active_gpu_ids else 0}")
 
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
     if trainable_params == 0:
         raise RuntimeError("No trainable parameters found.")
 
+    report = model.parameter_report()
     print(
-        f"Parameters | total={total_params:,} | trainable={trainable_params:,} | "
-        f"trainable%={100.0 * trainable_params / max(total_params, 1):.4f}%"
+        f"Parameters | total={report['total']:,} | trainable={report['trainable']:,} | "
+        f"trainable%={report['trainable_percentage']:.4f}%"
     )
+    print(f"Trainable modules: {report['trainable_modules']}")
+    print(f"Frozen visual parameters: {report['frozen_visual']:,}")
+    print(f"Frozen text parameters: {report['frozen_text']:,}")
 
     optimizer = _build_optimizer(model)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=max(1, int(Config.EPOCHS)),
+        eta_min=float(getattr(Config, "LR", 1e-6)) * 0.05,
+    )
 
     use_amp = Config.MIXED_PRECISION and device == "cuda"
     scaler = _make_grad_scaler(use_amp=use_amp)
@@ -574,8 +681,10 @@ def train():
         expected_split_signature=split_signature,
     )
 
-    if start_epoch >= Config.EPOCHS:
-        print("Training already completed.")
+    additional_epochs = max(0, int(getattr(Config, "EPOCHS", 0)))
+    target_epoch = _target_epoch(start_epoch)
+    if target_epoch <= start_epoch:
+        print("No epochs requested for this run.")
         return
 
     rng_train = random.Random(getattr(Config, "NEGATIVE_SEED", 123))
@@ -584,8 +693,11 @@ def train():
     print(f"Train pairs: {len(train_dataset)} | Val pairs: {len(val_dataset)}")
 
     # TRAIN LOOP
-    for epoch in range(start_epoch, Config.EPOCHS):
-        print(f"\nEpoch {epoch + 1}/{Config.EPOCHS}")
+    for epoch in range(start_epoch, target_epoch):
+        print(
+            f"\nEpoch {epoch + 1}/{target_epoch} "
+            f"(run epoch {epoch - start_epoch + 1}/{additional_epochs})"
+        )
 
         train_loss, train_bce, train_kd, train_steps, train_skipped = _run_epoch(
             model=model,
@@ -628,6 +740,11 @@ def train():
             f"Val BCE: {val_bce:.4f} | Val KD: {val_kd:.4f} | "
             f"Val Total: {val_loss:.4f} (steps={val_steps}, skipped={val_skipped})"
         )
+        scheduler.step()
+        print(
+            "Learning rates: "
+            + ", ".join(f"{group['lr']:.2e}" for group in optimizer.param_groups)
+        )
 
         # Evaluate and checkpoint every epoch; delayed checkpointing can miss the
         # best generalizing model on a small, noisy dataset.
@@ -653,7 +770,10 @@ def train():
         stale_epochs = int(getattr(model, "_stale_epochs", 0))
         stale_epochs = 0 if improved else stale_epochs + 1
         model._stale_epochs = stale_epochs
-        if stale_epochs >= patience:
+        if (
+            bool(getattr(Config, "EARLY_STOPPING_ENABLED", False))
+            and stale_epochs >= patience
+        ):
             print(f"Early stopping after {stale_epochs} epochs without validation improvement.")
             break
 

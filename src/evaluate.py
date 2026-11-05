@@ -9,7 +9,14 @@ from PIL import Image
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from src.dataset import ArtDataset, collate_fn, processor, format_emotion_prompt, resolve_image_path
+from src.dataset import (
+    ArtDataset,
+    collate_fn,
+    processor,
+    format_emotion_prompt,
+    format_emotion_prompts,
+    resolve_image_path,
+)
 from src.model import CLIPFineTuner
 from src.inference import calibrate_rejection_thresholds
 from utils.config import Config
@@ -112,7 +119,11 @@ def _ranking_metrics(model, dataset, candidate_emotions, device):
     if len(dataset.image_to_emotions) == 0 or len(candidate_emotions) == 0:
         return {"hit_at_1": 0.0, "hit_at_3": 0.0, "mrr": 0.0, "images": 0}
 
-    candidate_prompts = [format_emotion_prompt(e) for e in candidate_emotions]
+    candidate_prompts = [
+        prompt
+        for emotion in candidate_emotions
+        for prompt in format_emotion_prompts(emotion)
+    ]
     text_inputs = processor(
         text=candidate_prompts,
         return_tensors="pt",
@@ -123,10 +134,16 @@ def _ranking_metrics(model, dataset, candidate_emotions, device):
     text_inputs = {k: v.to(device) for k, v in text_inputs.items()}
 
     with torch.no_grad():
-        text_emb = model.encode_text(
+        prompt_emb = model.encode_text(
             input_ids=text_inputs["input_ids"],
             attention_mask=text_inputs["attention_mask"],
         )
+        text_emb = prompt_emb.view(
+            len(candidate_emotions),
+            -1,
+            prompt_emb.shape[-1],
+        ).mean(dim=1)
+        text_emb = torch.nn.functional.normalize(text_emb, dim=-1)
 
     hit1 = 0
     hit3 = 0
@@ -248,9 +265,19 @@ def evaluate():
     model.load_checkpoint_state_dict(state)
 
     gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
-    if device == "cuda" and getattr(Config, "MULTI_GPU", True) and gpu_count > 1:
+    configured_gpu_ids = getattr(Config, "GPU_IDS", None)
+    active_gpu_ids = (
+        list(range(gpu_count))
+        if configured_gpu_ids is None
+        else [int(device_id) for device_id in configured_gpu_ids]
+    )
+    if (
+        device == "cuda"
+        and getattr(Config, "MULTI_GPU", True)
+        and len(active_gpu_ids) > 1
+    ):
         model.enable_data_parallel()
-        print(f"Evaluation using DataParallel on {gpu_count} GPUs")
+        print(f"Evaluation using DataParallel on GPUs {active_gpu_ids}")
 
     model.eval()
 
@@ -277,15 +304,29 @@ def evaluate():
             batch = _move_to_device(batch, device=device, non_blocking=non_blocking)
 
             neg_texts = []
-            for image_key, emotion in zip(image_keys, emotions):
+            valid_indices = []
+            for index, (image_key, emotion) in enumerate(zip(image_keys, emotions)):
                 neg_emotion = dataset.sample_negative_emotion(
                     image_key=image_key,
                     current_emotion=emotion,
                     rng=rng,
                 )
                 if neg_emotion is None:
-                    neg_emotion = emotion
+                    continue
+                valid_indices.append(index)
                 neg_texts.append(format_emotion_prompt(neg_emotion))
+
+            if not neg_texts:
+                skipped_batches += 1
+                continue
+
+            # Keep only rows for which a true negative exists. The dataset may
+            # contain images whose entire candidate set is positively labelled.
+            if len(valid_indices) != len(image_keys):
+                batch = {
+                    key: value[valid_indices]
+                    for key, value in batch.items()
+                }
 
             neg_inputs = processor(
                 text=neg_texts,
