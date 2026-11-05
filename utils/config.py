@@ -143,7 +143,9 @@ class Config:
 
     # Conservative Kaggle defaults avoid worker deadlocks and excessive
     # prefetched image batches on mounted datasets.
-    NUM_WORKERS = 2 if IS_KAGGLE else max(2, min(8, os.cpu_count() or 2))
+    # Notebook-safe default: worker processes can remain silent or deadlock
+    # while reading mounted Kaggle files. Training logic is unchanged.
+    NUM_WORKERS = 0 if IS_KAGGLE else max(2, min(8, os.cpu_count() or 2))
     PREFETCH_FACTOR = 2
     PIN_MEMORY = True
     PERSISTENT_WORKERS = False if IS_KAGGLE else True

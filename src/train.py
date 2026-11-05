@@ -460,6 +460,11 @@ def _run_epoch(
     non_blocking = bool(getattr(Config, "NON_BLOCKING", True))
 
     for step, batch in enumerate(loader):
+        if step == 0:
+            print(
+                f"{'Train' if train_mode else 'Validation'}: first batch received.",
+                flush=True,
+            )
         if batch is None:
             skipped += 1
             continue
@@ -496,6 +501,11 @@ def _run_epoch(
 
         with torch.set_grad_enabled(train_mode):
             with autocast_ctx:
+                if step == 0:
+                    print(
+                        f"{'Train' if train_mode else 'Validation'}: first batch forward pass...",
+                        flush=True,
+                    )
                 pos_logits = model.pair_logits(
                     pixel_values=positive_pixel_values,
                     input_ids=positive_inputs["input_ids"],
@@ -645,6 +655,12 @@ def _run_epoch(
                 f"PosLogit {pos_logits.detach().float().mean().item():.4f} | "
                 f"NegLogit {neg_logits.detach().float().mean().item():.4f}"
             )
+        elif step > 0 and step % 25 == 0:
+            print(
+                f"{'Train' if train_mode else 'Validation'} progress: "
+                f"batch {step}/{len(loader)}",
+                flush=True,
+            )
 
     avg_loss = total_loss / max(steps, 1)
     result = (
@@ -721,11 +737,21 @@ def _append_training_history(epoch, phase, metrics):
 def train():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     _setup_cuda_backend()
+    print(
+        f"Training startup: device={device} | CUDA GPUs={torch.cuda.device_count()}",
+        flush=True,
+    )
 
     split_seed = getattr(Config, "SPLIT_SEED", 42)
     val_split = getattr(Config, "VAL_SPLIT", 0.2)
 
+    print("Training startup: loading all dataset records...", flush=True)
     all_dataset = ArtDataset(split="all", val_ratio=val_split, split_seed=split_seed)
+    print(
+        f"Training startup: all dataset ready ({len(all_dataset)} records, "
+        f"{len(all_dataset.image_to_emotions)} images).",
+        flush=True,
+    )
     split_plan = compute_zero_shot_emotion_split(all_dataset.data)
     seen_emotions = split_plan["seen_emotions"]
     holdout_emotions = split_plan["holdout_emotions"]
@@ -762,6 +788,11 @@ def train():
             "Training split is empty because no source images could be resolved. "
             "Configure Config.BASE_PATH or WIKIART_PATH; pairs.json was not modified."
         )
+    print(
+        f"Training startup: train={len(train_dataset)} records, "
+        f"validation={len(val_dataset)} records.",
+        flush=True,
+    )
 
     gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
     configured_gpu_ids = getattr(Config, "GPU_IDS", None)
@@ -787,8 +818,15 @@ def train():
         shuffle=False,
         batch_size=getattr(Config, "EVAL_BATCH_SIZE", Config.BATCH_SIZE),
     )
+    print(
+        f"Training startup: loaders ready | train batches={len(train_loader)} | "
+        f"validation batches={len(val_loader)} | workers={getattr(Config, 'NUM_WORKERS', 0)}",
+        flush=True,
+    )
 
+    print("Training startup: loading CLIP model...", flush=True)
     model = CLIPFineTuner().to(device)
+    print("Training startup: CLIP model ready.", flush=True)
 
     # CLIPFIT: Create the teacher before any checkpoint can alter the student.
     teacher = (
@@ -867,6 +905,7 @@ def train():
             f"\nEpoch {epoch + 1}/{target_epoch} "
             f"(run epoch {epoch - start_epoch + 1}/{additional_epochs})"
         )
+        print("Epoch progress: loading first training batch...", flush=True)
 
         train_metrics = _run_epoch(
             model=model,

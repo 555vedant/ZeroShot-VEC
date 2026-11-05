@@ -12,6 +12,10 @@ from utils.config import Config
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PROMPT_PREFIX = "a painting that evokes "
 
+print(
+    f"Dataset: loading CLIP processor '{Config.MODEL_NAME}'...",
+    flush=True,
+)
 
 def _to_abs(path_value):
     path = Path(path_value)
@@ -335,6 +339,7 @@ class ArtDataset(Dataset):
 
 
 processor = CLIPProcessor.from_pretrained(Config.MODEL_NAME, use_fast=False)
+print("Dataset: CLIP processor ready.", flush=True)
 
 
 def collate_fn(batch):
