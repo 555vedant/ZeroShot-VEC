@@ -93,10 +93,12 @@ class Config:
 
     # TRAERINING
     BATCH_SIZE = 64
-    EPOCHS = 4
+    EPOCHS = 3
     RESUME_ADDITIONAL_EPOCHS = True
     CHECKPOINT_INTVAL = 5
-    FINE_TUNING_STRATEGY = "visual_lora"
+    # CLIPFit updates only small normalization/text-bias parameters and uses
+    # the frozen pretrained model as a teacher, preserving zero-shot alignment.
+    FINE_TUNING_STRATEGY = "clipfit"
     FREEZE_TEXT_ENCODER = True
     FREEZE_TEXT_PROJECTION = True
     FREEZE_VISUAL_BACKBONE = True
@@ -107,9 +109,9 @@ class Config:
     LORA_DROPOUT = 0.05
     LORA_TRAIN_VISUAL_PROJECTION = False
     LORA_TRAIN_VISUAL_NORMS = False
-    USE_KNOWLEDGE_DISTILLATION = False
-    CLIPFIT_KD_WEIGHT = 0.0
-    LR = 5e-4
+    USE_KNOWLEDGE_DISTILLATION = True
+    CLIPFIT_KD_WEIGHT = 8.0
+    LR = 1e-4
     VAL_SPLIT = 0.2
     TRAINING_CHECKPOINT_FILE = OUTPUT_MODELS_DIR / "latest_checkpoint.pt"
     TRAINING_LOG_FILE = OUTPUT_LOGS_DIR / "training_history.csv"

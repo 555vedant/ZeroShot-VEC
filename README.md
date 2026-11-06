@@ -63,13 +63,19 @@ This preserves general visual and language knowledge while adapting the model to
 
 **Loss function** — symmetric contrastive loss over batches of image–emotion pairs. Correct pairs are pulled together in the embedding space; incorrect pairs are pushed apart. The final loss is the average of image-to-text and text-to-image losses.
 
-The current training configuration uses visual LoRA adapters on the query and
-value projections of the final four vision blocks. The CLIP text encoder,
-text projection, and base visual weights remain frozen. Training also uses
-weighted multi-negative ranking, dynamic negatives that exclude all valid
-emotions for an image, cosine learning-rate decay, and prompt-ensemble
-evaluation. The source `pairs.json` is never regenerated automatically when
-it already exists.
+The current training configuration uses CLIPFit, updating only small
+normalization and text-bias parameters while distilling from a frozen
+pretrained teacher. This preserves the image-text alignment required for
+zero-shot evaluation. Training also uses weighted multi-negative ranking,
+dynamic negatives that exclude all valid emotions for an image, cosine
+learning-rate decay, and prompt-ensemble evaluation. The source `pairs.json`
+is never regenerated automatically when it already exists.
+
+General evaluation uses the same seen-emotion and image-disjoint training
+split as training. Strict zero-shot evaluation is reported separately on the
+held-out emotions. Pair accuracy uses a threshold calibrated on the seen
+validation split; the fixed `0.5` cutoff is not meaningful for temperature-
+scaled CLIP logits.
 
 ---
 

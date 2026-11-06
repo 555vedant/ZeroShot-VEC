@@ -4,6 +4,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from pathlib import Path
 import random
+import json
 from collections import defaultdict
 from PIL import Image
 
@@ -17,6 +18,7 @@ from src.dataset import (
     format_emotion_prompts,
     resolve_image_path,
     compute_zero_shot_emotion_split,
+    compute_zero_shot_split_signature,
 )
 from src.model import CLIPFineTuner
 from utils.config import Config
@@ -80,6 +82,44 @@ def _binary_metrics(scores, labels, threshold=0.5):
         "fp": fp,
         "fn": fn,
     }
+
+
+def _load_calibration_threshold():
+    path = _to_abs(getattr(Config, "EVALUATION_RESULTS_FILE", ""))
+    try:
+        results = json.loads(path.read_text(encoding="utf-8"))
+        threshold = results.get("pair_matching", {}).get("threshold")
+        if threshold is not None:
+            return float(threshold)
+    except (OSError, ValueError, TypeError):
+        pass
+    return 0.5
+
+
+def _select_checkpoint(expected_signature):
+    candidates = []
+    for configured in (
+        getattr(Config, "CHECKPOINT_FILE", None),
+        getattr(Config, "TRAINING_CHECKPOINT_FILE", None),
+    ):
+        if configured is None:
+            continue
+        path = _to_abs(configured)
+        if path.exists() and path not in candidates:
+            candidates.append(path)
+
+    for path in candidates:
+        checkpoint = torch.load(path, map_location="cpu")
+        if not isinstance(checkpoint, dict) or "model_state_dict" not in checkpoint:
+            continue
+        if checkpoint.get("split_signature") == expected_signature:
+            return path, checkpoint
+
+    available = ", ".join(str(path) for path in candidates) or "none"
+    raise RuntimeError(
+        "No checkpoint matches the current zero-shot split signature. "
+        f"Available checkpoints: {available}. Retrain on the current manifest."
+    )
 
 
 def _auroc(scores, labels):
@@ -147,6 +187,7 @@ def _build_zero_shot_eval_dataset(split_seed, val_split):
 
     return {
         "dataset": all_dataset,
+        "split_plan": split_plan,
         "candidate_emotions": holdout_emotions,
         "train_emotions": split_plan["seen_emotions"],
         "all_emotions": split_plan["all_emotions"],
@@ -268,16 +309,11 @@ def evaluate():
 
     loader = _make_loader(dataset, batch_size=getattr(Config, "EVAL_BATCH_SIZE", Config.BATCH_SIZE))
 
-    checkpoint_path = _to_abs(Config.CHECKPOINT_FILE)
-
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(f"Checkpoint not found at: {checkpoint_path}")
-
-    print(f"Loading checkpoint: {checkpoint_path}")
+    expected_signature = compute_zero_shot_split_signature(zero_shot["split_plan"])
+    checkpoint_path, checkpoint = _select_checkpoint(expected_signature)
+    print(f"Loading checkpoint: {checkpoint_path} (epoch {checkpoint.get('epoch', '?')})")
     model = CLIPFineTuner().to(device)
-    state = torch.load(checkpoint_path, map_location=device)
-    if isinstance(state, dict) and "model_state_dict" in state:
-        state = state["model_state_dict"]
+    state = checkpoint["model_state_dict"]
     model.load_checkpoint_state_dict(state)
 
     gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
@@ -387,7 +423,8 @@ def evaluate():
         dim=0,
     )
 
-    metrics = _binary_metrics(scores=scores, labels=labels, threshold=0.5)
+    threshold = _load_calibration_threshold()
+    metrics = _binary_metrics(scores=scores, labels=labels, threshold=threshold)
     auc = _auroc(scores=scores, labels=labels)
 
     ranking = _ranking_metrics(
@@ -400,10 +437,11 @@ def evaluate():
     print(f"\nEvaluation Summary: Skipped batches={skipped_batches}")
     print("Pair Matching Metrics (Zero-Shot)")
     print(f"  Pos pairs: {len(pos_scores)} | Neg pairs: {len(neg_scores)}")
-    print(f"  Accuracy@0.5: {metrics['accuracy'] * 100:.2f}%")
-    print(f"  Precision@0.5: {metrics['precision'] * 100:.2f}%")
-    print(f"  Recall@0.5: {metrics['recall'] * 100:.2f}%")
-    print(f"  F1@0.5: {metrics['f1'] * 100:.2f}%")
+    print(f"  Calibration threshold (seen validation): {threshold:.6f}")
+    print(f"  Accuracy@threshold: {metrics['accuracy'] * 100:.2f}%")
+    print(f"  Precision@threshold: {metrics['precision'] * 100:.2f}%")
+    print(f"  Recall@threshold: {metrics['recall'] * 100:.2f}%")
+    print(f"  F1@threshold: {metrics['f1'] * 100:.2f}%")
     print(f"  AUROC: {auc * 100:.2f}%")
     print("Ranking Metrics (Zero-Shot Images)")
     print(f"  Images evaluated: {ranking['images']}")

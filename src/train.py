@@ -19,6 +19,7 @@ from src.dataset import (
     format_emotion_prompt,
     format_emotion_prompts,
     compute_zero_shot_emotion_split,
+    compute_zero_shot_split_signature,
 )
 from src.model import CLIPFineTuner
 from utils.config import Config
@@ -240,16 +241,15 @@ def _try_resume_training(
             checkpoint = torch.load(checkpoint_path, map_location=device)
             is_full_checkpoint = isinstance(checkpoint, dict) and "model_state_dict" in checkpoint
             state_dict = checkpoint["model_state_dict"] if is_full_checkpoint else checkpoint
+            checkpoint_signature = checkpoint.get("split_signature") if is_full_checkpoint else None
+            if expected_split_signature and checkpoint_signature and checkpoint_signature != expected_split_signature:
+                print("Skipping checkpoint: training strategy or zero-shot split does not match current run.")
+                continue
             if getattr(Config, "FINE_TUNING_STRATEGY", "") == "visual_lora":
                 if not any("lora_A" in key or "lora_B" in key for key in state_dict):
                     print("Skipping legacy checkpoint without visual LoRA parameters.")
                     continue
             model.load_checkpoint_state_dict(state_dict)
-
-            checkpoint_signature = checkpoint.get("split_signature") if is_full_checkpoint else None
-            if expected_split_signature and checkpoint_signature and checkpoint_signature != expected_split_signature:
-                print("Skipping checkpoint: zero-shot split does not match current data split.")
-                continue
 
             if is_full_checkpoint:
                 optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -278,15 +278,7 @@ def _try_resume_training(
     return 0, float("inf")
 
 def _compute_split_signature(split_plan):
-    payload = {
-        "seen_emotions": sorted(split_plan.get("seen_emotions", [])),
-        "holdout_emotions": sorted(split_plan.get("holdout_emotions", [])),
-        "source": split_plan.get("source", "unknown"),
-        "seed": int(getattr(Config, "ZERO_SHOT_SPLIT_SEED", getattr(Config, "SPLIT_SEED", 42))),
-        "fine_tuning_strategy": getattr(Config, "FINE_TUNING_STRATEGY", "full"),
-    }
-    serialized = json.dumps(payload, sort_keys=True, ensure_ascii=True)
-    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    return compute_zero_shot_split_signature(split_plan)
 
 
 def _target_epoch(start_epoch):

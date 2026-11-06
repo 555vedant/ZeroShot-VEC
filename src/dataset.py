@@ -3,6 +3,8 @@ from torch.utils.data import Dataset
 from transformers import CLIPProcessor
 from pathlib import Path
 import random
+import hashlib
+import json
 from collections import defaultdict
 from typing import Dict, List, Optional, Sequence, Set
 
@@ -132,6 +134,26 @@ def compute_zero_shot_emotion_split(records):
         "all_emotions": all_emotions,
         "emotion_counts": counts,
     }
+
+
+def compute_zero_shot_split_signature(split_plan):
+    payload = {
+        "seen_emotions": sorted(split_plan.get("seen_emotions", [])),
+        "holdout_emotions": sorted(split_plan.get("holdout_emotions", [])),
+        "source": split_plan.get("source", "unknown"),
+        "seed": int(
+            getattr(
+                Config,
+                "ZERO_SHOT_SPLIT_SEED",
+                getattr(Config, "SPLIT_SEED", 42),
+            )
+        ),
+        "fine_tuning_strategy": getattr(
+            Config, "FINE_TUNING_STRATEGY", "full"
+        ),
+    }
+    serialized = json.dumps(payload, sort_keys=True, ensure_ascii=True)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def resolve_image_path(raw_path):
