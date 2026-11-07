@@ -149,7 +149,7 @@ def compute_zero_shot_split_signature(split_plan):
             )
         ),
         "fine_tuning_strategy": getattr(
-            Config, "FINE_TUNING_STRATEGY", "full"
+            Config, "FINE_TUNING_STRATEGY", "visual_finetune"
         ),
     }
     serialized = json.dumps(payload, sort_keys=True, ensure_ascii=True)

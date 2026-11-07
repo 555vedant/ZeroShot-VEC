@@ -1,5 +1,4 @@
 import torch
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import re
 import random
@@ -16,8 +15,6 @@ from src.dataset import (
     ArtDataset,
     collate_fn,
     processor,
-    format_emotion_prompt,
-    format_emotion_prompts,
     compute_zero_shot_emotion_split,
     compute_zero_shot_split_signature,
 )
@@ -26,9 +23,6 @@ from utils.config import Config
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-_NEGATIVE_TEXT_CACHE = {}
-
-
 def _make_grad_scaler(use_amp: bool):
     if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
         return torch.amp.GradScaler("cuda", enabled=use_amp)
@@ -103,9 +97,6 @@ def _build_optimizer(model):
             or name.startswith("model.module.vision_model.")
             or name.startswith("model.module.text_model.")
         )
-        if "lora_A" in name or "lora_B" in name:
-            is_backbone = False
-
         if is_backbone:
             backbone_params.append(param)
         else:
@@ -245,10 +236,6 @@ def _try_resume_training(
             if expected_split_signature and checkpoint_signature and checkpoint_signature != expected_split_signature:
                 print("Skipping checkpoint: training strategy or zero-shot split does not match current run.")
                 continue
-            if getattr(Config, "FINE_TUNING_STRATEGY", "") == "visual_lora":
-                if not any("lora_A" in key or "lora_B" in key for key in state_dict):
-                    print("Skipping legacy checkpoint without visual LoRA parameters.")
-                    continue
             model.load_checkpoint_state_dict(state_dict)
 
             if is_full_checkpoint:
@@ -289,131 +276,31 @@ def _target_epoch(start_epoch):
 
 
 # LOSS
-def matching_bce_loss(pos_logits, neg_logits, positive_weights=None):
-    return _matching_bce_components(
-        pos_logits, neg_logits, positive_weights=positive_weights
-    )["total"]
-
-
-def _matching_bce_components(pos_logits, neg_logits, positive_weights=None):
-    pos_targets = torch.ones_like(pos_logits)
-    neg_targets = torch.full_like(
-        neg_logits,
-        float(getattr(Config, "NEGATIVE_TARGET", 0.1)),
+def _multi_positive_contrastive_loss(logits, image_keys, emotions, dataset):
+    batch_size = logits.shape[0]
+    positive_mask = torch.zeros(
+        (batch_size, batch_size),
+        dtype=torch.bool,
+        device=logits.device,
     )
+    for row, (image_key, emotion) in enumerate(zip(image_keys, emotions)):
+        image_emotions = dataset.image_to_emotions.get(image_key, {emotion})
+        for column, candidate_emotion in enumerate(emotions):
+            if candidate_emotion in image_emotions:
+                positive_mask[row, column] = True
 
-    if positive_weights is None:
-        positive_weights = torch.ones_like(pos_logits)
-    positive_weights = positive_weights / positive_weights.mean().clamp_min(1e-6)
-    pos_loss = F.binary_cross_entropy_with_logits(
-        pos_logits, pos_targets, weight=positive_weights
-    )
-    neg_weights = positive_weights.unsqueeze(1).expand_as(neg_logits)
-    neg_loss = F.binary_cross_entropy_with_logits(
-        neg_logits, neg_targets, weight=neg_weights
-    )
-    # Compare every sampled negative with the strongest negative for the image.
-    hardest_negative = neg_logits.max(dim=1).values
-    ranking = F.softplus(0.2 + hardest_negative - pos_logits)
-    ranking = (ranking * positive_weights).mean()
-    negative_weight = float(getattr(Config, "NEGATIVE_LOSS_WEIGHT", 0.25))
-    pointwise = pos_loss + negative_weight * neg_loss
-    total = pointwise + float(getattr(Config, "RANKING_LOSS_WEIGHT", 0.5)) * ranking
-    return {
-        "total": total,
-        "positive_loss": pos_loss,
-        "negative_loss": neg_loss,
-        "ranking_loss": ranking,
-    }
+    if not positive_mask.any(dim=1).all():
+        raise RuntimeError("Every training image must have at least one positive emotion.")
 
-
-# CLIPFIT: kd loss
-def clipfit_kd_loss(student_embeds, teacher_embeds):
-    student_embeds = F.normalize(student_embeds, dim=-1)
-    teacher_embeds = F.normalize(teacher_embeds, dim=-1)
-    return 1.0 - (student_embeds * teacher_embeds).sum(dim=-1).mean()
-
-
-# CLIPFIT:
-def _clipfit_teacher_image_embeddings(teacher, pixel_values):
-    outputs = teacher.vision_model(pixel_values=pixel_values)
-    pooled = getattr(outputs, "pooler_output", None)
-    if pooled is None:
-        pooled = outputs[1]
-    projected = teacher.visual_projection(pooled)
-    return F.normalize(projected, dim=-1)
-
-
-def _build_negative_text_inputs(dataset, image_keys, emotions, device, rng):
-    negative_texts = []
-    negative_count = max(1, int(getattr(Config, "NEGATIVE_COUNT", 4)))
-
-    for image_key, emotion in zip(image_keys, emotions):
-        candidates = [
-            emotion_name
-            for emotion_name in dataset.emotions
-            if emotion_name not in dataset.image_to_emotions.get(image_key, set())
-        ]
-        if not candidates:
-            candidates = [emotion]
-        candidates.sort(key=lambda name: dataset.emotion_frequency.get(name, 0), reverse=True)
-        hard_count = min(
-            len(candidates),
-            max(1, round(negative_count * float(getattr(Config, "NEGATIVE_HARD_FRACTION", 0.5)))),
-        )
-        selected = candidates[:hard_count]
-        remaining = [name for name in candidates if name not in selected]
-        rng.shuffle(remaining)
-        selected.extend(remaining[: max(0, negative_count - len(selected))])
-        selected.extend([selected[-1]] * max(0, negative_count - len(selected)))
-        for name in selected[:negative_count]:
-            negative_texts.extend(format_emotion_prompts(name))
-
-    cached_inputs = []
-    for text in negative_texts:
-        cached = _NEGATIVE_TEXT_CACHE.get(text)
-        if cached is None:
-            cached = processor(
-                text=[text],
-                return_tensors="pt",
-                padding="max_length",
-                truncation=True,
-                max_length=Config.TEXT_MAX_LENGTH,
-            )
-            cached = {key: value.cpu() for key, value in cached.items()}
-            _NEGATIVE_TEXT_CACHE[text] = cached
-        cached_inputs.append(cached)
-
-    neg_inputs = {
-        key: torch.cat([item[key] for item in cached_inputs], dim=0)
-        for key in cached_inputs[0]
-    }
-
-    non_blocking = bool(getattr(Config, "NON_BLOCKING", True))
-    return {
-        k: v.to(device, non_blocking=non_blocking)
-        for k, v in neg_inputs.items()
-    }
-
-
-def _build_positive_text_inputs(emotions, device):
-    texts = [
-        prompt
-        for emotion in emotions
-        for prompt in format_emotion_prompts(emotion)
-    ]
-    inputs = processor(
-        text=texts,
-        return_tensors="pt",
-        padding="max_length",
-        truncation=True,
-        max_length=Config.TEXT_MAX_LENGTH,
-    )
-    non_blocking = bool(getattr(Config, "NON_BLOCKING", True))
-    return {
-        key: value.to(device, non_blocking=non_blocking)
-        for key, value in inputs.items()
-    }
+    image_loss = -(
+        torch.logsumexp(logits.masked_fill(~positive_mask, float("-inf")), dim=1)
+        - torch.logsumexp(logits, dim=1)
+    ).mean()
+    text_loss = -(
+        torch.logsumexp(logits.masked_fill(~positive_mask, float("-inf")), dim=0)
+        - torch.logsumexp(logits, dim=0)
+    ).mean()
+    return 0.5 * (image_loss + text_loss)
 
 
 def _run_epoch(
@@ -426,7 +313,6 @@ def _run_epoch(
     dataset,
     rng,
     train_mode,
-    teacher=None,
     return_details=False,
 ):
     total_loss = 0.0
@@ -470,19 +356,6 @@ def _run_epoch(
             continue
 
         batch = _move_to_device(batch, device=device, non_blocking=non_blocking)
-        neg_inputs = _build_negative_text_inputs(dataset, image_keys, emotions, device, rng)
-        negative_count = max(1, int(getattr(Config, "NEGATIVE_COUNT", 4)))
-        prompt_count = len(format_emotion_prompts(emotions[0]))
-        positive_inputs = _build_positive_text_inputs(emotions, device)
-        negative_pixel_values = batch["pixel_values"].repeat_interleave(
-            negative_count * prompt_count,
-            dim=0,
-        )
-        positive_pixel_values = batch["pixel_values"].repeat_interleave(
-            prompt_count,
-            dim=0,
-        )
-
         if train_mode:
             optimizer.zero_grad(set_to_none=True)
 
@@ -498,68 +371,30 @@ def _run_epoch(
                         f"{'Train' if train_mode else 'Validation'}: first batch forward pass...",
                         flush=True,
                     )
-                pos_logits = model.pair_logits(
-                    pixel_values=positive_pixel_values,
-                    input_ids=positive_inputs["input_ids"],
-                    attention_mask=positive_inputs["attention_mask"],
-                    temperature=Config.TEMPERATURE,
+                logits = model.contrastive_logits(
+                    pixel_values=batch["pixel_values"],
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
                 )
-                pos_logits = pos_logits.view(len(emotions), prompt_count).mean(dim=1)
-
-                neg_logits = model.pair_logits(
-                    pixel_values=negative_pixel_values,
-                    input_ids=neg_inputs["input_ids"],
-                    attention_mask=neg_inputs["attention_mask"],
-                    temperature=Config.TEMPERATURE,
+                contrastive_loss = _multi_positive_contrastive_loss(
+                    logits, image_keys, emotions, dataset
                 )
-                neg_logits = neg_logits.view(
-                    len(emotions),
-                    negative_count,
-                    prompt_count,
-                ).mean(dim=2)
-
-                frequencies = torch.tensor(
-                    [
-                        dataset.emotion_frequency.get(emotion, 1)
-                        for emotion in emotions
-                    ],
-                    dtype=pos_logits.dtype,
-                    device=device,
+                pos_indices = torch.arange(logits.shape[0], device=device)
+                pos_logits = logits[pos_indices, pos_indices]
+                negative_mask = ~torch.eye(
+                    logits.shape[0], dtype=torch.bool, device=device
                 )
-                power = float(getattr(Config, "CLASS_WEIGHT_POWER", 0.5))
-                positive_weights = frequencies.clamp_min(1.0).pow(-power)
-                positive_weights = positive_weights.clamp(
-                    max=float(getattr(Config, "CLASS_WEIGHT_MAX", 4.0))
-                )
-                loss_components = _matching_bce_components(
-                    pos_logits, neg_logits, positive_weights=positive_weights
-                )
-                bce_loss = loss_components["total"]
+                neg_logits = logits.masked_fill(~negative_mask, float("-inf"))
+                neg_logits = neg_logits.max(dim=1).values
+                loss_components = {
+                    "total": contrastive_loss,
+                    "positive_loss": contrastive_loss,
+                    "negative_loss": torch.zeros_like(contrastive_loss),
+                    "ranking_loss": torch.zeros_like(contrastive_loss),
+                }
+                bce_loss = contrastive_loss
                 kd_loss = torch.zeros((), device=device)
-                if teacher is not None:
-                    student_image_embeds = model.encode_images(batch["pixel_values"])
-                    student_text_embeds = model.encode_text(
-                        input_ids=batch["input_ids"],
-                        attention_mask=batch["attention_mask"],
-                    )
-                    with torch.no_grad():
-                        teacher_image_embeds = _clipfit_teacher_image_embeddings(
-                            teacher, batch["pixel_values"]
-                        )
-                        teacher_text_output = teacher.get_text_features(
-                            input_ids=batch["input_ids"],
-                            attention_mask=batch["attention_mask"],
-                        )
-                        teacher_text_embeds = F.normalize(
-                            model._to_embedding_tensor(teacher_text_output, modality="text"),
-                            dim=-1,
-                        )
-                    kd_loss = 0.5 * (
-                        clipfit_kd_loss(student_image_embeds, teacher_image_embeds)
-                        + clipfit_kd_loss(student_text_embeds, teacher_text_embeds)
-                    )
-
-                loss = bce_loss + float(getattr(Config, "CLIPFIT_KD_WEIGHT", 8.0)) * kd_loss
+                loss = contrastive_loss
 
         if not torch.isfinite(loss).item():
             nonfinite_batches += 1
@@ -820,14 +655,6 @@ def train():
     model = CLIPFineTuner().to(device)
     print("Training startup: CLIP model ready.", flush=True)
 
-    # CLIPFIT: Create the teacher before any checkpoint can alter the student.
-    teacher = (
-        model.create_clipfit_teacher().to(device)
-        if getattr(Config, "FINE_TUNING_STRATEGY", "visual_lora") == "clipfit"
-        and bool(getattr(Config, "USE_KNOWLEDGE_DISTILLATION", False))
-        else None
-    )
-
     if (
         device == "cuda"
         and getattr(Config, "MULTI_GPU", True)
@@ -909,7 +736,6 @@ def train():
             dataset=train_dataset,
             rng=rng_train,
             train_mode=True,
-            teacher=teacher,
             return_details=True,
         )
         train_loss = train_metrics["loss"]
@@ -934,7 +760,6 @@ def train():
                 dataset=val_dataset,
                 rng=rng_val,
                 train_mode=False,
-                teacher=teacher,
                 return_details=True,
             )
             val_loss = val_metrics["loss"]

@@ -1,34 +1,9 @@
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
-import copy
 from collections import OrderedDict
 from transformers import CLIPModel
 from utils.config import Config
-
-
-class LoRALinear(nn.Module):
-    def __init__(self, base_layer, rank, alpha, dropout):
-        super().__init__()
-        if rank <= 0:
-            raise ValueError("LORA_RANK must be positive.")
-        if not isinstance(base_layer, nn.Linear):
-            raise TypeError("LoRA can only wrap nn.Linear modules.")
-
-        self.base = base_layer
-        self.rank = int(rank)
-        self.scaling = float(alpha) / float(rank)
-        self.dropout = nn.Dropout(float(dropout))
-        self.lora_A = nn.Parameter(torch.empty(self.rank, base_layer.in_features))
-        self.lora_B = nn.Parameter(torch.zeros(base_layer.out_features, self.rank))
-        nn.init.kaiming_uniform_(self.lora_A, a=5**0.5)
-        for parameter in self.base.parameters():
-            parameter.requires_grad = False
-
-    def forward(self, inputs):
-        update = F.linear(self.dropout(inputs), self.lora_A)
-        update = F.linear(update, self.lora_B) * self.scaling
-        return self.base(inputs) + update
 
 
 class CLIPFineTuner(nn.Module):
@@ -38,74 +13,24 @@ class CLIPFineTuner(nn.Module):
         self._configure_strategy()
 
     def _configure_strategy(self):
-        strategy = getattr(Config, "FINE_TUNING_STRATEGY", "visual_lora")
-        if strategy == "visual_lora":
-            self._configure_visual_lora()
-        elif strategy == "full":
-            self._configure_full_fallback()
-        elif strategy == "clipfit":
-            self._configure_clipfit_parameters()
+        strategy = getattr(Config, "FINE_TUNING_STRATEGY", "visual_finetune")
+        if strategy == "visual_finetune":
+            self._configure_visual_finetune()
         else:
-            raise ValueError(
-                "FINE_TUNING_STRATEGY must be 'visual_lora', 'full', or 'clipfit'."
-            )
+            raise ValueError("FINE_TUNING_STRATEGY must be 'visual_finetune'.")
 
     def _freeze_all_parameters(self):
         for parameter in self.model.parameters():
             parameter.requires_grad = False
 
-    def _configure_visual_lora(self):
-        if not bool(getattr(Config, "FREEZE_TEXT_ENCODER", True)):
-            raise ValueError("visual_lora requires FREEZE_TEXT_ENCODER=True.")
-        if not bool(getattr(Config, "FREEZE_TEXT_PROJECTION", True)):
-            raise ValueError("visual_lora requires FREEZE_TEXT_PROJECTION=True.")
-        if not bool(getattr(Config, "FREEZE_VISUAL_BACKBONE", True)):
-            raise ValueError("visual_lora requires FREEZE_VISUAL_BACKBONE=True.")
+    def _configure_visual_finetune(self):
         self._freeze_all_parameters()
         layers = self.model.vision_model.encoder.layers
-        last_n = max(1, min(int(Config.LORA_TARGET_LAST_N_BLOCKS), len(layers)))
-        targets = {str(value).lower() for value in Config.LORA_TARGET}
-        replaced = []
-        for index in range(len(layers) - last_n, len(layers)):
-            attention = layers[index].self_attn
-            for name in ("q_proj", "v_proj"):
-                short_name = name[0]
-                if short_name not in targets:
-                    continue
-                original = getattr(attention, name, None)
-                if not isinstance(original, nn.Linear):
-                    raise TypeError(
-                        f"Expected vision block {index} {name} to be nn.Linear, "
-                        f"got {type(original)!r}."
-                    )
-                setattr(
-                    attention,
-                    name,
-                    LoRALinear(
-                        original,
-                        rank=int(Config.LORA_RANK),
-                        alpha=float(Config.LORA_ALPHA),
-                        dropout=float(Config.LORA_DROPOUT),
-                    ),
-                )
-                replaced.append(f"vision_model.encoder.layers.{index}.self_attn.{name}")
-
-        if not replaced:
-            raise RuntimeError("Visual LoRA did not replace any attention projections.")
-        if bool(getattr(Config, "LORA_TRAIN_VISUAL_PROJECTION", False)):
-            for parameter in self.model.visual_projection.parameters():
+        last_n = max(1, min(int(Config.VISUAL_TRAIN_LAST_N_BLOCKS), len(layers)))
+        for layer in layers[-last_n:]:
+            for parameter in layer.parameters():
                 parameter.requires_grad = True
-        if bool(getattr(Config, "LORA_TRAIN_VISUAL_NORMS", False)):
-            for module in self.model.vision_model.modules():
-                if isinstance(module, nn.LayerNorm):
-                    for parameter in module.parameters():
-                        parameter.requires_grad = True
-        self._lora_modules = tuple(replaced)
-        self._assert_parameter_policy()
-
-    def _configure_full_fallback(self):
-        self._freeze_all_parameters()
-        for parameter in self.model.vision_model.parameters():
+        for parameter in self.model.visual_projection.parameters():
             parameter.requires_grad = True
         self.model.logit_scale.requires_grad = False
 
@@ -141,59 +66,6 @@ class CLIPFineTuner(nn.Module):
             "frozen_visual": frozen_visual,
             "frozen_text": frozen_text,
         }
-
-    def _assert_parameter_policy(self):
-        trainable_names = [
-            name for name, parameter in self.named_parameters() if parameter.requires_grad
-        ]
-        if not trainable_names:
-            raise RuntimeError("Visual LoRA has no trainable parameters.")
-        invalid = [
-            name for name in trainable_names
-            if "lora_A" not in name and "lora_B" not in name
-        ]
-        if invalid:
-            raise RuntimeError(
-                "Visual LoRA unexpectedly enabled non-LoRA parameters: "
-                + ", ".join(invalid[:5])
-            )
-        total = sum(parameter.numel() for parameter in self.parameters())
-        trainable = sum(
-            parameter.numel()
-            for parameter in self.parameters()
-            if parameter.requires_grad
-        )
-        percentage = 100.0 * trainable / max(total, 1)
-        if percentage >= 2.0:
-            raise RuntimeError(
-                f"Visual LoRA trainable percentage is {percentage:.2f}%; expected < 2%."
-            )
-
-    # CLIPFit: text FFN output biases and image-side LayerNorms only.
-    def _configure_clipfit_parameters(self):
-        self._freeze_all_parameters()
-
-        for module in self.model.vision_model.modules():
-            if isinstance(module, nn.LayerNorm):
-                for parameter in module.parameters():
-                    parameter.requires_grad = True
-
-        # CLIPFit updates the second (output) linear layer bias in each text FFN.
-        for layer in self.model.text_model.encoder.layers:
-            layer.mlp.fc2.bias.requires_grad = True
-
-    # CLIPFIT: Preserve the pretrained image representation as a frozen teacher.
-    def create_clipfit_teacher(self):
-        teacher = copy.deepcopy(self.model)
-        for parameter in teacher.parameters():
-            parameter.requires_grad = False
-        teacher.eval()
-        return teacher
-
-    @staticmethod
-    def _set_requires_grad(module, flag):
-        for p in module.parameters():
-            p.requires_grad = bool(flag)
 
     @staticmethod
     def _unfreeze_top_encoder_layers(encoder_module, top_k):
@@ -426,3 +298,12 @@ class CLIPFineTuner(nn.Module):
 
         logits = (image_embeds * text_embeds).sum(dim=-1) * scale
         return logits
+
+    def contrastive_logits(self, pixel_values, input_ids, attention_mask):
+        image_embeds = self.encode_images(pixel_values)
+        text_embeds = self.encode_text(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+        )
+        scale = self.core_model().logit_scale.exp().clamp(max=100)
+        return image_embeds @ text_embeds.T * scale

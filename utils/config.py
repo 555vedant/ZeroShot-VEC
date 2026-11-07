@@ -91,27 +91,17 @@ class Config:
     IMAGE_SIZE = 224
     TEXT_MAX_LENGTH = 77
 
-    # TRAERINING
+    # TRAINING
     BATCH_SIZE = 64
-    EPOCHS = 3
+    EPOCHS = 15
     RESUME_ADDITIONAL_EPOCHS = True
     CHECKPOINT_INTVAL = 5
-    # CLIPFit updates only small normalization/text-bias parameters and uses
-    # the frozen pretrained model as a teacher, preserving zero-shot alignment.
-    FINE_TUNING_STRATEGY = "clipfit"
+    # Adapt the image encoder to art while keeping CLIP's language space intact.
+    FINE_TUNING_STRATEGY = "visual_finetune"
     FREEZE_TEXT_ENCODER = True
     FREEZE_TEXT_PROJECTION = True
-    FREEZE_VISUAL_BACKBONE = True
-    LORA_TARGET = ["q", "v"]
-    LORA_TARGET_LAST_N_BLOCKS = 4
-    LORA_RANK = 8
-    LORA_ALPHA = 16
-    LORA_DROPOUT = 0.05
-    LORA_TRAIN_VISUAL_PROJECTION = False
-    LORA_TRAIN_VISUAL_NORMS = False
-    USE_KNOWLEDGE_DISTILLATION = True
-    CLIPFIT_KD_WEIGHT = 8.0
-    LR = 1e-4
+    VISUAL_TRAIN_LAST_N_BLOCKS = 6
+    LR = 1e-5
     VAL_SPLIT = 0.2
     TRAINING_CHECKPOINT_FILE = OUTPUT_MODELS_DIR / "latest_checkpoint.pt"
     TRAINING_LOG_FILE = OUTPUT_LOGS_DIR / "training_history.csv"
@@ -120,12 +110,7 @@ class Config:
     NEGATIVE_SEED = 123
 
     TEMPERATURE = 0.07
-    LOSS_TYPE = "multi_negative_ranking"
-    RANKING_LOSS_WEIGHT = 0.5
-    NEGATIVE_COUNT = 3
-    NEGATIVE_HARD_FRACTION = 0.25
-    NEGATIVE_LOSS_WEIGHT = 0.25
-    NEGATIVE_TARGET = 0.1
+    LOSS_TYPE = "multi_positive_contrastive"
     CLASS_WEIGHT_POWER = 0.5
     CLASS_WEIGHT_MAX = 4.0
     WARMUP_RATIO = 0.1
