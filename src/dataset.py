@@ -39,10 +39,16 @@ def format_emotion_prompt(emotion):
 
 def format_emotion_prompts(emotion):
     templates = getattr(Config, "PROMPT_TEMPLATES", None)
-    if not templates:
-        return [format_emotion_prompt(emotion)]
     value = str(emotion).strip().lower()
-    return [template.format(emotion=value) for template in templates]
+    prompts = (
+        [template.format(emotion=value) for template in templates]
+        if templates
+        else [format_emotion_prompt(value)]
+    )
+    description = getattr(Config, "EMOTION_DESCRIPTIONS", {}).get(value)
+    if description:
+        prompts.append(description)
+    return list(dict.fromkeys(prompts))
 
 
 def _normalize_emotion_list(items):

@@ -68,8 +68,11 @@ blocks and visual projection with CLIP's symmetric multi-positive contrastive
 loss. The text encoder remains frozen so the adapted image representation
 stays aligned with unseen emotion words for zero-shot evaluation. Multiple
 emotion annotations for the same image are treated as positives rather than
-false negatives. The source `pairs.json` is never regenerated automatically
-when it already exists.
+false negatives. Evaluation uses an art-specific prompt ensemble, including
+contextual emotion descriptions rather than only emotion names. This follows
+the prompt-sensitivity findings of Widhoelzl and Takmaz, “Decoding Emotions in
+Abstract Art” (2024, arXiv:2405.06319). The source `pairs.json` is never
+regenerated automatically when it already exists.
 
 General evaluation uses the same seen-emotion and image-disjoint training
 split as training. Strict zero-shot evaluation is reported separately on the

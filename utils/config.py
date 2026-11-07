@@ -93,7 +93,7 @@ class Config:
 
     # TRAINING
     BATCH_SIZE = 64
-    EPOCHS = 5
+    EPOCHS = 4
     RESUME_ADDITIONAL_EPOCHS = True
     CHECKPOINT_INTVAL = 5
     # Adapt the image encoder to art while keeping CLIP's language space intact.
@@ -160,3 +160,16 @@ class Config:
         "a painting conveying a feeling of {emotion}",
         "an artwork associated with {emotion}",
     )
+    # Art-specific descriptions follow the prompt-ensemble strategy used in
+    # CLIP-based abstract-art emotion studies.
+    EMOTION_DESCRIPTIONS = {
+        "awe": "a painting with a sense of wonder and vastness",
+        "anger": "a painting with intense conflict and aggression",
+        "amusement": "a painting with playful and humorous energy",
+        "contentment": "a painting with calm, peaceful satisfaction",
+        "disgust": "a painting with repulsion and disturbing imagery",
+        "excitement": "a painting with energetic, thrilling movement",
+        "fear": "a painting with danger, anxiety, and tension",
+        "sadness": "a painting with sorrow, loss, and melancholy",
+        "something_else": "a painting expressing an unusual or uncategorized feeling",
+    }
