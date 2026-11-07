@@ -93,7 +93,7 @@ class Config:
 
     # TRAINING
     BATCH_SIZE = 64
-    EPOCHS = 15
+    EPOCHS = 5
     RESUME_ADDITIONAL_EPOCHS = True
     CHECKPOINT_INTVAL = 5
     # Adapt the image encoder to art while keeping CLIP's language space intact.
