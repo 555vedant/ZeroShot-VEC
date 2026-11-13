@@ -88,12 +88,20 @@ def _load_calibration_threshold():
     path = _to_abs(getattr(Config, "EVALUATION_RESULTS_FILE", ""))
     try:
         results = json.loads(path.read_text(encoding="utf-8"))
-        threshold = results.get("pair_matching", {}).get("threshold")
-        if threshold is not None:
-            return float(threshold)
-    except (OSError, ValueError, TypeError):
-        pass
-    return 0.5
+    except (OSError, ValueError) as error:
+        raise RuntimeError(
+            "Seen-validation calibration is missing or invalid. Run "
+            "src/evaluate.py before zero-shot evaluation so the threshold is "
+            "calibrated instead of defaulting to 0.5."
+        ) from error
+
+    threshold = results.get("pair_matching", {}).get("threshold")
+    if not isinstance(threshold, (int, float)):
+        raise RuntimeError(
+            "Seen-validation calibration has no pair-matching threshold. "
+            "Run src/evaluate.py before zero-shot evaluation."
+        )
+    return float(threshold)
 
 
 def _select_checkpoint(expected_signature):

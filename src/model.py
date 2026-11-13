@@ -197,21 +197,10 @@ class CLIPFineTuner(nn.Module):
 
     def encode_images(self, pixel_values):
         if self.is_data_parallel():
-            # HF CLIP requires both modalities in its DataParallel forward.
-            # Dummy text keeps image-only calls distributed across GPUs.
-            batch_size = int(pixel_values.shape[0])
-            dummy_ids = torch.zeros(
-                (batch_size, 1),
-                dtype=torch.long,
-                device=pixel_values.device,
-            )
-            dummy_mask = torch.ones_like(dummy_ids)
-            outputs = self.model(
-                pixel_values=pixel_values,
-                input_ids=dummy_ids,
-                attention_mask=dummy_mask,
-            )
-            embeds = outputs.image_embeds
+            # Calling the full HF CLIP forward through DataParallel also
+            # returns pairwise logits. Uneven prompt/image shards then have
+            # incompatible square shapes during DataParallel gather.
+            embeds = self.core_model().get_image_features(pixel_values=pixel_values)
         else:
             embeds = self.model.get_image_features(pixel_values=pixel_values)
         embeds = self._to_embedding_tensor(embeds, modality="image")
@@ -219,18 +208,12 @@ class CLIPFineTuner(nn.Module):
 
     def encode_text(self, input_ids, attention_mask):
         if self.is_data_parallel():
-            batch_size = int(input_ids.shape[0])
-            dummy_pixels = torch.zeros(
-                (batch_size, 3, Config.IMAGE_SIZE, Config.IMAGE_SIZE),
-                dtype=self.core_model().vision_model.embeddings.patch_embedding.weight.dtype,
-                device=input_ids.device,
-            )
-            outputs = self.model(
-                pixel_values=dummy_pixels,
+            # Use the text feature API directly for image-independent text
+            # encoding; it avoids gathering unused pairwise logits.
+            embeds = self.core_model().get_text_features(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
             )
-            embeds = outputs.text_embeds
         else:
             embeds = self.model.get_text_features(
                 input_ids=input_ids,

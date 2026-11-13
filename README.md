@@ -92,6 +92,10 @@ held-out emotions. Pair accuracy uses a threshold calibrated on the seen
 validation split; the fixed `0.5` cutoff is not meaningful for temperature-
 scaled CLIP logits.
 
+Run `src/evaluate.py` before `src/zero-short-evaluation.py` so the seen-
+validation threshold is available; zero-shot evaluation fails explicitly when
+that calibration is missing rather than reporting a misleading 50% accuracy.
+
 ---
 
 ## Zero-Shot Capability

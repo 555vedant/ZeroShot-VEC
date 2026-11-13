@@ -324,9 +324,6 @@ class ArtDataset(Dataset):
         pool = self.emotions if candidate_pool is None else list(candidate_pool)
         candidates = [e for e in pool if e not in positives]
 
-        if not candidates and current_emotion is not None:
-            candidates = [e for e in pool if e != current_emotion]
-
         if not candidates:
             return None
 
