@@ -130,9 +130,9 @@ class Config:
 
     # Image decoding and CLIP preprocessing happen on the host. Kaggle's
     # default uses workers so both GPUs are not starved by the input pipeline.
-    _default_workers = 4 if IS_KAGGLE else max(2, min(8, os.cpu_count() or 2))
+    _default_workers = min(8, max(2, os.cpu_count() or 2))
     NUM_WORKERS = int(os.getenv("TRAIN_NUM_WORKERS", str(_default_workers)))
-    PREFETCH_FACTOR = int(os.getenv("TRAIN_PREFETCH_FACTOR", "2"))
+    PREFETCH_FACTOR = int(os.getenv("TRAIN_PREFETCH_FACTOR", "4"))
     PIN_MEMORY = True
     PERSISTENT_WORKERS = os.getenv(
         "TRAIN_PERSISTENT_WORKERS",

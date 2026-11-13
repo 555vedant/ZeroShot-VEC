@@ -58,7 +58,7 @@ class SearchEngine:
         self.model.load_checkpoint_state_dict(state)
         self.model.eval()
 
-        self.processor = CLIPProcessor.from_pretrained(Config.MODEL_NAME, use_fast=False)
+        self.processor = CLIPProcessor.from_pretrained(Config.MODEL_NAME, use_fast=True)
 
         self.image_dir = Path(image_dir) if image_dir else None
         if self.image_dir is not None:

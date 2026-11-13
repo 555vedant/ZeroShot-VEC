@@ -366,7 +366,7 @@ class ArtDataset(Dataset):
         }
 
 
-processor = CLIPProcessor.from_pretrained(Config.MODEL_NAME, use_fast=False)
+processor = CLIPProcessor.from_pretrained(Config.MODEL_NAME, use_fast=True)
 print("Dataset: CLIP processor ready.", flush=True)
 
 
