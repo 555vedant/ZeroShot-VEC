@@ -74,6 +74,18 @@ the prompt-sensitivity findings of Widhoelzl and Takmaz, “Decoding Emotions in
 Abstract Art” (2024, arXiv:2405.06319). The source `pairs.json` is never
 regenerated automatically when it already exists.
 
+On Kaggle, training automatically uses every visible CUDA GPU through
+DataParallel and runs image decoding/preprocessing in four worker processes.
+The input pipeline can be tuned without editing code:
+
+```bash
+TRAIN_NUM_WORKERS=4 TRAIN_PREFETCH_FACTOR=2 TRAIN_BATCH_SIZE=64 python src/train.py
+```
+
+Keep the training batch size divisible by the number of visible GPUs so each
+GPU receives work on every training step. Set `TRAIN_NUM_WORKERS=0` when the
+runtime does not support worker processes.
+
 General evaluation uses the same seen-emotion and image-disjoint training
 split as training. Strict zero-shot evaluation is reported separately on the
 held-out emotions. Pair accuracy uses a threshold calibrated on the seen

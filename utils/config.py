@@ -92,7 +92,7 @@ class Config:
     TEXT_MAX_LENGTH = 77
 
     # TRAINING
-    BATCH_SIZE = 64
+    BATCH_SIZE = int(os.getenv("TRAIN_BATCH_SIZE", "64"))
     EPOCHS = 4
     RESUME_ADDITIONAL_EPOCHS = True
     CHECKPOINT_INTVAL = 5
@@ -128,14 +128,16 @@ class Config:
     GPU_IDS = None  # None means use every CUDA device visible to PyTorch.
     TF32 = True
 
-    # Conservative Kaggle defaults avoid worker deadlocks and excessive
-    # prefetched image batches on mounted datasets.
-    # Notebook-safe default: worker processes can remain silent or deadlock
-    # while reading mounted Kaggle files. Training logic is unchanged.
-    NUM_WORKERS = 0 if IS_KAGGLE else max(2, min(8, os.cpu_count() or 2))
-    PREFETCH_FACTOR = 2
+    # Image decoding and CLIP preprocessing happen on the host. Kaggle's
+    # default uses workers so both GPUs are not starved by the input pipeline.
+    _default_workers = 4 if IS_KAGGLE else max(2, min(8, os.cpu_count() or 2))
+    NUM_WORKERS = int(os.getenv("TRAIN_NUM_WORKERS", str(_default_workers)))
+    PREFETCH_FACTOR = int(os.getenv("TRAIN_PREFETCH_FACTOR", "2"))
     PIN_MEMORY = True
-    PERSISTENT_WORKERS = False if IS_KAGGLE else True
+    PERSISTENT_WORKERS = os.getenv(
+        "TRAIN_PERSISTENT_WORKERS",
+        "1",
+    ) == "1"
     NON_BLOCKING = True
     DROP_LAST_MULTI_GPU_TRAIN = True
 

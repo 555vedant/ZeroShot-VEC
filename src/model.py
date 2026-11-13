@@ -300,10 +300,49 @@ class CLIPFineTuner(nn.Module):
         return logits
 
     def contrastive_logits(self, pixel_values, input_ids, attention_mask):
-        image_embeds = self.encode_images(pixel_values)
-        text_embeds = self.encode_text(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-        )
+        if self.is_data_parallel():
+            gpu_count = len(getattr(self, "_data_parallel_device_ids", ()))
+            batch_size = int(pixel_values.shape[0])
+            if gpu_count > 1 and batch_size >= gpu_count and batch_size % gpu_count == 0:
+                # Run both encoders in one scatter/replicate/gather cycle.
+                # Separate image/text calls would execute the full CLIP model twice.
+                outputs = self.model(
+                    pixel_values=pixel_values,
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                )
+                image_embeds = F.normalize(
+                    self._to_embedding_tensor(outputs, modality="image"),
+                    dim=-1,
+                )
+                text_embeds = F.normalize(
+                    self._to_embedding_tensor(outputs, modality="text"),
+                    dim=-1,
+                )
+            else:
+                core = self.core_model()
+                image_embeds = F.normalize(
+                    self._to_embedding_tensor(
+                        core.get_image_features(pixel_values=pixel_values),
+                        modality="image",
+                    ),
+                    dim=-1,
+                )
+                text_embeds = F.normalize(
+                    self._to_embedding_tensor(
+                        core.get_text_features(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                        ),
+                        modality="text",
+                    ),
+                    dim=-1,
+                )
+        else:
+            image_embeds = self.encode_images(pixel_values)
+            text_embeds = self.encode_text(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            )
         scale = self.core_model().logit_scale.exp().clamp(max=100)
         return image_embeds @ text_embeds.T * scale
