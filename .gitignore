@@ -10,3 +10,5 @@ __pycache__/
 webapp/clip_model.pth
 webapp/clip_model1.pth
 webapp/uploads/webapp/*.pth
+
+summary.md

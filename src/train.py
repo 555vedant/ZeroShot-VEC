@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import re
 import random
@@ -303,6 +304,31 @@ def _multi_positive_contrastive_loss(logits, image_keys, emotions, dataset):
     return 0.5 * (image_loss + text_loss)
 
 
+def _hard_negative_margin_loss(logits, positive_mask, margin):
+    """Penalize the strongest valid in-batch negative in both directions."""
+    row_has_negative = (~positive_mask).any(dim=1)
+    column_has_negative = (~positive_mask).any(dim=0)
+
+    if not row_has_negative.any() and not column_has_negative.any():
+        return logits.sum() * 0.0
+
+    row_positive = logits.masked_fill(~positive_mask, float("-inf")).max(dim=1).values
+    row_negative = logits.masked_fill(positive_mask, float("-inf")).max(dim=1).values
+    row_loss = F.relu(float(margin) + row_negative - row_positive)
+    row_loss = row_loss[row_has_negative].mean() if row_has_negative.any() else logits.sum() * 0.0
+
+    column_positive = logits.masked_fill(~positive_mask, float("-inf")).max(dim=0).values
+    column_negative = logits.masked_fill(positive_mask, float("-inf")).max(dim=0).values
+    column_loss = F.relu(float(margin) + column_negative - column_positive)
+    column_loss = (
+        column_loss[column_has_negative].mean()
+        if column_has_negative.any()
+        else logits.sum() * 0.0
+    )
+
+    return 0.5 * (row_loss + column_loss)
+
+
 def _run_epoch(
     model,
     loader,
@@ -379,6 +405,24 @@ def _run_epoch(
                 contrastive_loss = _multi_positive_contrastive_loss(
                     logits, image_keys, emotions, dataset
                 )
+                positive_mask = torch.zeros(
+                    logits.shape,
+                    dtype=torch.bool,
+                    device=logits.device,
+                )
+                for row, (image_key, emotion) in enumerate(zip(image_keys, emotions)):
+                    image_emotions = dataset.image_to_emotions.get(image_key, {emotion})
+                    for column, candidate_emotion in enumerate(emotions):
+                        if candidate_emotion in image_emotions:
+                            positive_mask[row, column] = True
+                hard_negative_loss = _hard_negative_margin_loss(
+                    logits,
+                    positive_mask,
+                    getattr(Config, "HARD_NEGATIVE_MARGIN", 0.05),
+                )
+                hard_negative_weight = float(
+                    getattr(Config, "HARD_NEGATIVE_WEIGHT", 0.0)
+                )
                 pos_indices = torch.arange(logits.shape[0], device=device)
                 pos_logits = logits[pos_indices, pos_indices]
                 negative_mask = ~torch.eye(
@@ -387,14 +431,14 @@ def _run_epoch(
                 neg_logits = logits.masked_fill(~negative_mask, float("-inf"))
                 neg_logits = neg_logits.max(dim=1).values
                 loss_components = {
-                    "total": contrastive_loss,
+                    "total": contrastive_loss + hard_negative_weight * hard_negative_loss,
                     "positive_loss": contrastive_loss,
-                    "negative_loss": torch.zeros_like(contrastive_loss),
+                    "negative_loss": hard_negative_loss,
                     "ranking_loss": torch.zeros_like(contrastive_loss),
                 }
                 bce_loss = contrastive_loss
                 kd_loss = torch.zeros((), device=device)
-                loss = contrastive_loss
+                loss = loss_components["total"]
 
         if not torch.isfinite(loss).item():
             nonfinite_batches += 1

@@ -111,6 +111,8 @@ class Config:
 
     TEMPERATURE = 0.07
     LOSS_TYPE = "multi_positive_contrastive"
+    HARD_NEGATIVE_WEIGHT = 0.1
+    HARD_NEGATIVE_MARGIN = 0.05
     CLASS_WEIGHT_POWER = 0.5
     CLASS_WEIGHT_MAX = 4.0
     WARMUP_RATIO = 0.1
