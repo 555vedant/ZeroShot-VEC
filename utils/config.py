@@ -93,7 +93,7 @@ class Config:
 
     # TRAINING
     BATCH_SIZE = int(os.getenv("TRAIN_BATCH_SIZE", "64"))
-    EPOCHS = 4
+    EPOCHS = 15
     RESUME_ADDITIONAL_EPOCHS = True
     CHECKPOINT_INTVAL = 5
     # Adapt the image encoder to art while keeping CLIP's language space intact.
